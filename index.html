@@ -349,14 +349,22 @@
 
     /* ── Optimized Pixel Sampling Helpers ── */
     function getPixel(imgData, x, y) {
+        // Safety check for NaN or undefined coordinates
+        if (isNaN(x) || isNaN(y)) return { r: 128, g: 128, b: 128 };
+        
         const ix = Math.max(0, Math.min(Math.round(x), imgData.width - 1));
         const iy = Math.max(0, Math.min(Math.round(y), imgData.height - 1));
         const i = (iy * imgData.width + ix) * 4;
+        
+        // Final safety check for index
+        if (isNaN(i) || i < 0 || i >= imgData.data.length) return { r: 128, g: 128, b: 128 };
+        
         return { r: imgData.data[i], g: imgData.data[i+1], b: imgData.data[i+2] };
     }
 
     function sampleGrid(imgData, cx, cy, radius) {
         const colors = [];
+        if (isNaN(cx) || isNaN(cy)) return colors;
         for (let dy = -radius; dy <= radius; dy++) {
             for (let dx = -radius; dx <= radius; dx++) {
                 colors.push(getPixel(imgData, cx + dx, cy + dy));
@@ -366,38 +374,45 @@
     }
 
     function avgOfColors(colors) {
-        if (!colors.length) return { r: 180, g: 150, b: 130 };
+        if (!colors || !colors.length) return { r: 180, g: 150, b: 130 };
         let r = 0, g = 0, b = 0;
-        for (const c of colors) { r += c.r; g += c.g; b += c.b; }
-        return { r: Math.round(r / colors.length), g: Math.round(g / colors.length), b: Math.round(b / colors.length) };
+        for (const c of colors) { r += (c.r||0); g += (c.g||0); b += (c.b||0); }
+        const n = colors.length;
+        return { r: Math.round(r / n), g: Math.round(g / n), b: Math.round(b / n) };
     }
 
     function medianColor(colors) {
-        if (!colors.length) return { r: 180, g: 150, b: 130 };
-        const sorted = [...colors].sort((a, b) => (a.r + a.g + a.b) - (b.r + b.g + b.b));
+        if (!colors || !colors.length) return { r: 180, g: 150, b: 130 };
+        const sorted = [...colors].sort((a, b) => ((a.r + a.g + a.b) || 0) - ((b.r + b.g + b.b) || 0));
         return sorted[Math.floor(sorted.length / 2)];
     }
 
-    function brightnessOf(c) { return (c.r + c.g + c.b) / 3; }
+    function brightnessOf(c) { return ((c.r||0) + (c.g||0) + (c.b||0)) / 3; }
 
     function avgBrightnessOfPts(imgData, pts) {
-        if (!pts.length) return 128;
+        if (!pts || !pts.length) return 128;
         let total = 0;
+        let count = 0;
         for (const p of pts) {
+            if (!p || isNaN(p.x) || isNaN(p.y)) continue;
             const c = getPixel(imgData, p.x, p.y);
             total += (c.r + c.g + c.b) / 3;
+            count++;
         }
-        return total / pts.length;
+        return count > 0 ? total / count : 128;
     }
 
     function avgColorOfPts(imgData, pts) {
-        if (!pts.length) return { r: 60, g: 60, b: 60 };
+        if (!pts || !pts.length) return { r: 60, g: 60, b: 60 };
         let r = 0, g = 0, b = 0;
+        let count = 0;
         for (const p of pts) {
+            if (!p || isNaN(p.x) || isNaN(p.y)) continue;
             const c = getPixel(imgData, p.x, p.y);
             r += c.r; g += c.g; b += c.b;
+            count++;
         }
-        return { r: Math.round(r / pts.length), g: Math.round(g / pts.length), b: Math.round(b / pts.length) };
+        return count > 0 ? { r: Math.round(r / count), g: Math.round(g / count), b: Math.round(b / count) } : { r: 60, g: 60, b: 60 };
     }
 
     function clampBrightness(c, lo, hi) {
