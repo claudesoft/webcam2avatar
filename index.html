@@ -336,11 +336,13 @@
 
             const photoData = canvas.toDataURL('image/jpeg', 0.8);
             const avatars = [
+                { name: 'WhatsApp Style', svg: generateWhatsappAvatar(features) },
                 { name: 'DNA Vector', svg: generateDnaAvatar(features) },
                 { name: 'Comic Photo', svg: generateComicAvatar(photoData) },
                 { name: 'Cartoon', svg: generateCartoonAvatar(features) },
                 { name: 'Artistic', svg: generateArtisticAvatar(features) },
                 { name: 'Minimal', svg: generateMinimalAvatar(features) },
+                { name: 'Geometric', svg: generateGeoAvatar(features) },
             ];
             
             setStatus('Generiere Avatare...', true);
@@ -521,28 +523,40 @@
             }
             hairColor = clampBrightness(hairColor, 15, 210);
 
-            // ── Refined Expression ──
+            // ── Refined Expression & Mood ──
             let refinedExpression = 'Normal';
+            let mood = 'neutral';
             if (expression === 'happy') {
-                refinedExpression = expressionScore > 0.85 ? '\u00dcbergl\u00fccklich' : 'Normal lachend';
+                refinedExpression = expressionScore > 0.85 ? 'Überglücklich' : 'Lachend';
+                mood = 'happy';
             } else if (expression === 'sad') {
                 refinedExpression = expressionScore > 0.7 ? 'Voll traurig' : 'Traurig';
+                mood = 'sad';
+            } else if (expression === 'angry') {
+                refinedExpression = 'Wütend';
+                mood = 'angry';
+            } else if (expression === 'surprised') {
+                refinedExpression = 'Überrascht';
+                mood = 'surprised';
             } else if (expression === 'neutral') {
                 refinedExpression = 'Neutral';
-            } else {
-                const m = { angry: 'W\u00fctend', fearful: '\u00c4ngstlich', disgusted: 'Angewidert', surprised: '\u00dcberrascht' };
-                refinedExpression = m[expression] || expression;
+                mood = 'neutral';
             }
 
-            // ── Mustache Detection ──
-            const mustacheZone = [];
-            const noseBottom = nose[6];
-            const mouthTop = mouth[3];
-            for (let t = 0.2; t <= 0.8; t += 0.3) {
-                mustacheZone.push(...sampleGrid(imgData, noseBottom.x, noseBottom.y + (mouthTop.y - noseBottom.y) * t, 2));
-            }
-            const mustacheBr = avgBrightnessOfPts(imgData, mustacheZone);
-            const hasMustache = (mustacheBr < skinBr * 0.78);
+            // ── Eyebrow Analysis ──
+            const getBrowHeight = (brow, eye) => {
+                const bY = brow.reduce((sum, p) => sum + p.y, 0) / brow.length;
+                const eY = eye.reduce((sum, p) => sum + p.y, 0) / eye.length;
+                return eY - bY;
+            };
+            const leftBrowH = getBrowHeight(leftBrow, leftEye);
+            const rightBrowH = getBrowHeight(rightBrow, rightEye);
+            const avgBrowH = (leftBrowH + rightBrowH) / 2;
+            
+            // Typical brow height is around 20-30px in a 160px crop
+            let browStyle = 'normal';
+            if (avgBrowH > 28) browStyle = 'hoch';
+            else if (avgBrowH < 18) browStyle = 'tief/konzentriert';
 
             // ── Teeth Detection ──
             let showsTeeth = false;
@@ -575,11 +589,11 @@
             const glasses = detectGlasses(imgData, lm, skinBr);
 
             return {
-                age, gender, genderProb, expression, refinedExpression,
+                age, gender, genderProb, expression, refinedExpression, mood,
                 skinColor, hairColor,
                 skinHex: rgbHex(skinColor),
                 hairHex: rgbHex(hairColor),
-                glasses, hasMustache, showsTeeth, noseShape, hasEarrings
+                glasses, showsTeeth, noseShape, hasEarrings, browStyle
             };
         } catch (e) {
             logToScreen('ERR in extractFeatures: ' + e.message, 'error');
@@ -638,6 +652,94 @@
             s += `<ellipse cx="${rx}" cy="${ey}" rx="15" ry="11" ${tint} stroke="${gc}" stroke-width="${sw}"/>`;
         }
         s += `<path d="M${lx+13} ${ey-1} Q${midX} ${ey-4} ${rx-13} ${ey-1}" stroke="${gc}" stroke-width="${sw*0.8}" fill="none"/>`;
+        return s;
+    }
+
+    /* ── Avatar: WhatsApp Style (Modern Meta) ── */
+    function generateWhatsappAvatar(f) {
+        const sk = f.skinHex, skD = brighten(sk, 0.85), hr = f.hairHex;
+        const bg = '#25D366'; // WhatsApp Green
+        const cl = pickCloth(sk + 'wa');
+        const fem = f.gender === 'female' && f.genderProb > 0.55;
+        
+        let s = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">`;
+        s += `<defs>
+            <radialGradient id="grad-face" cx="50%" cy="40%" r="60%">
+                <stop offset="0%" stop-color="${brighten(sk, 1.1)}"/>
+                <stop offset="100%" stop-color="${skD}"/>
+            </radialGradient>
+            <linearGradient id="grad-shirt" x1="0%" y1="0%" x2="0%" y2="100%">
+                <stop offset="0%" stop-color="${cl}"/>
+                <stop offset="100%" stop-color="${brighten(cl, 0.8)}"/>
+            </linearGradient>
+        </defs>`;
+        
+        // Background circle
+        s += `<circle cx="100" cy="100" r="100" fill="${bg}"/>`;
+        
+        // Shirt / Torso
+        s += `<path d="M40 190 Q100 160 160 190 L160 200 L40 200 Z" fill="url(#grad-shirt)"/>`;
+        
+        // Neck
+        s += `<rect x="88" y="140" width="24" height="20" rx="5" fill="${skD}"/>`;
+        
+        // Hair (Back part for females)
+        if (fem) {
+            s += `<path d="M45 100 Q40 40 100 35 Q160 40 155 100 L165 160 Q100 150 35 160 Z" fill="${hr}"/>`;
+        }
+        
+        // Face shape (Modern rounded)
+        s += `<path d="M55 90 Q55 45 100 45 Q145 45 145 90 Q145 145 100 150 Q55 145 55 90" fill="url(#grad-face)"/>`;
+        
+        // Eyebrows
+        let bY = f.browStyle === 'hoch' ? 70 : (f.browStyle === 'tief/konzentriert' ? 82 : 76);
+        let bAng = f.mood === 'angry' ? 15 : (f.mood === 'sad' ? -10 : 0);
+        
+        s += `<g transform="rotate(${bAng}, 78, ${bY})"><rect x="65" y="${bY}" width="25" height="4.5" rx="2.5" fill="${hr}" opacity="0.8"/></g>`;
+        s += `<g transform="rotate(${-bAng}, 122, ${bY})"><rect x="110" y="${bY}" width="25" height="4.5" rx="2.5" fill="${hr}" opacity="0.8"/></g>`;
+        
+        // Eyes
+        const eY = 95;
+        s += `<circle cx="78" cy="${eY}" r="6" fill="#1a1a1a"/>`;
+        s += `<circle cx="122" cy="${eY}" r="6" fill="#1a1a1a"/>`;
+        s += `<circle cx="80" cy="${eY-2}" r="1.5" fill="white" opacity="0.6"/>`;
+        s += `<circle cx="124" cy="${eY-2}" r="1.5" fill="white" opacity="0.6"/>`;
+        
+        // Glasses
+        if (f.glasses.hasGlasses) {
+            const gc = f.glasses.colorHex || '#333';
+            s += `<circle cx="78" cy="${eY}" r="12" fill="none" stroke="${gc}" stroke-width="2.5" opacity="0.9"/>`;
+            s += `<circle cx="122" cy="${eY}" r="12" fill="none" stroke="${gc}" stroke-width="2.5" opacity="0.9"/>`;
+            s += `<path d="M90 ${eY} L110 ${eY}" stroke="${gc}" stroke-width="2.2" opacity="0.9"/>`;
+        }
+        
+        // Nose
+        const nY = 115;
+        s += `<path d="M92 ${nY} Q100 ${nY+5} 108 ${nY}" stroke="${brighten(sk, 0.7)}" stroke-width="1.5" fill="none" stroke-linecap="round"/>`;
+        
+        // Mouth
+        const mY = 132;
+        if (f.mood === 'happy') {
+            if (f.showsTeeth) {
+                s += `<path d="M80 ${mY} Q100 ${mY+15} 120 ${mY} Z" fill="white" stroke="${brighten(sk, 0.6)}" stroke-width="1"/>`;
+            } else {
+                s += `<path d="M80 ${mY} Q100 ${mY+12} 120 ${mY}" stroke="${brighten(sk, 0.5)}" stroke-width="2.5" fill="none" stroke-linecap="round"/>`;
+            }
+        } else if (f.mood === 'sad' || f.mood === 'angry') {
+            s += `<path d="M85 ${mY+5} Q100 ${mY-2} 115 ${mY+5}" stroke="${brighten(sk, 0.5)}" stroke-width="2.5" fill="none" stroke-linecap="round"/>`;
+        } else {
+            s += `<path d="M85 ${mY+2} Q100 ${mY+4} 115 ${mY+2}" stroke="${brighten(sk, 0.5)}" stroke-width="2.5" fill="none" stroke-linecap="round"/>`;
+        }
+        
+        // Hair (Top part)
+        if (!fem) {
+            s += `<path d="M55 85 Q55 35 100 30 Q145 35 145 85 Q125 60 100 60 Q75 60 55 85" fill="${hr}"/>`;
+        } else {
+            // Front hair / Bangs for female
+            s += `<path d="M55 80 Q75 50 100 55 Q125 50 145 80 Q140 45 100 45 Q60 45 55 80" fill="${hr}"/>`;
+        }
+        
+        s += `</svg>`;
         return s;
     }
 
@@ -745,7 +847,6 @@
         s += renderGlasses(f, 79, 121, ey, 'cartoon');
         const nw = f.noseShape === 'breit' ? 8 : 4;
         s += `<path d="M${100-nw} 103 Q100 110 ${100+nw} 103" stroke="${skD}" stroke-width="1.5" fill="none" stroke-linecap="round"/>`;
-        if (f.hasMustache) s += `<path d="M85 112 Q100 108 115 112 Q110 118 100 118 Q90 118 85 112" fill="${hrD}"/>`;
         const my = 120;
         if (f.expression === 'happy') {
             if (f.showsTeeth) s += `<path d="M82 ${my} Q100 ${my+15} 118 ${my} Z" fill="white" stroke="#c0392b" stroke-width="1.5"/>`;
@@ -767,7 +868,6 @@
         const ey = 85;
         s += `<line x1="75" y1="${ey}" x2="95" y2="${ey}" stroke="white" stroke-width="3" stroke-linecap="round" opacity="0.6"/>`;
         s += `<line x1="105" y1="${ey}" x2="125" y2="${ey}" stroke="white" stroke-width="3" stroke-linecap="round" opacity="0.6"/>`;
-        if (f.hasMustache) s += `<path d="M80 115 Q100 110 120 115" stroke="${hrD}" stroke-width="4" fill="none" stroke-linecap="round"/>`;
         const my = 130;
         if (f.expression === 'happy') s += `<path d="M85 ${my} Q100 ${my+15} 115 ${my}" stroke="white" stroke-width="2" fill="none" opacity="0.5"/>`;
         else s += `<line x1="90" y1="${my}" x2="110" y2="${my}" stroke="white" stroke-width="1" opacity="0.3"/>`;
@@ -828,7 +928,7 @@
             <div class="feature-item"><span class="label">Hautton</span><span class="value"><span class="color-dot" style="background:${features.skinHex}"></span>${features.skinHex}</span></div>
             <div class="feature-item"><span class="label">Haarfarbe</span><span class="value"><span class="color-dot" style="background:${features.hairHex}"></span>${features.hairHex}</span></div>
             <div class="feature-item"><span class="label">Brille</span><span class="value">${features.glasses.hasGlasses ? 'Ja ('+features.glasses.shape+')' : 'Nein'}</span></div>
-            <div class="feature-item"><span class="label">Schnurrbart</span><span class="value">${features.hasMustache ? 'Ja' : 'Nein'}</span></div>
+            <div class="feature-item"><span class="label">Augenbrauen</span><span class="value">${features.browStyle}</span></div>
             <div class="feature-item"><span class="label">Ohrringe</span><span class="value">${features.hasEarrings ? 'Ja' : 'Nein'}</span></div>
             <div class="feature-item"><span class="label">Nase</span><span class="value">${features.noseShape}</span></div>
             <div class="feature-item"><span class="label">Z\u00e4hne</span><span class="value">${features.showsTeeth ? 'Sichtbar' : 'Nicht sichtbar'}</span></div>
