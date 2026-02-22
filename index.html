@@ -262,10 +262,11 @@
             return;
         }
 
-        setStatus('Gesicht erkannt! Analysiere Merkmale (Hautton, Haare, Brille)...', true);
+        setStatus('Gesicht erkannt! Analysiere Merkmale (Hautton, Haare, Brille, Schnurrbart)...', true);
         const features = extractFeatures(detection, ctx);
         const avatars = [
             { name: 'Cartoon', svg: generateCartoonAvatar(features) },
+            { name: 'Artistic', svg: generateArtisticAvatar(features) },
             { name: 'Minimal', svg: generateMinimalAvatar(features) },
             { name: 'Geo', svg: generateGeoAvatar(features) },
         ];
@@ -371,7 +372,7 @@
     function pickBg(seed) { return BG_COLORS[Math.abs(hashStr(seed)) % BG_COLORS.length]; }
     function pickCloth(seed) { return CLOTH_COLORS[Math.abs(hashStr(seed)) % CLOTH_COLORS.length]; }
 
-    /* ── Feature Extraction (improved) ── */
+    /* ── Feature Extraction (refined) ── */
     function extractFeatures(det, ctx) {
         const lm = det.landmarks;
         const age = Math.round(det.age);
@@ -379,10 +380,13 @@
         const genderProb = det.genderProbability;
 
         const exprs = det.expressions;
-        const expression = Object.entries(exprs).sort((a, b) => b[1] - a[1])[0][0];
+        const sortedExprs = Object.entries(exprs).sort((a, b) => b[1] - a[1]);
+        const expression = sortedExprs[0][0];
+        const expressionScore = sortedExprs[0][1];
 
         const jaw = lm.getJawOutline();
         const nose = lm.getNose();
+        const mouth = lm.getMouth();
         const leftBrow = lm.getLeftEyeBrow();
         const rightBrow = lm.getRightEyeBrow();
         const leftEye = lm.getLeftEye();
@@ -390,231 +394,129 @@
 
         // ── Skin color: sample from well-lit face areas ──
         const skinSamples = [];
-
-        // Forehead center (between brows, above nose bridge)
         const foreheadX = (leftBrow[2].x + rightBrow[2].x) / 2;
         const foreheadY = (leftBrow[2].y + rightBrow[2].y) / 2;
         skinSamples.push(...sampleGrid(ctx, foreheadX, foreheadY, 3));
-
-        // Nose bridge sides (well-lit, center of face)
         skinSamples.push(...sampleGrid(ctx, nose[0].x - 8, nose[0].y, 2));
         skinSamples.push(...sampleGrid(ctx, nose[0].x + 8, nose[0].y, 2));
 
-        // Upper cheeks (between eye and nose, closer to nose = better lit)
         for (const eyeSet of [leftEye, rightEye]) {
             const cx = (eyeSet[0].x + eyeSet[3].x) / 2;
-            const noseCx = nose[0].x;
-            const cheekX = cx + (noseCx - cx) * 0.4;
+            const cheekX = cx + (nose[0].x - cx) * 0.4;
             const cheekY = eyeSet[4].y + 10;
             skinSamples.push(...sampleGrid(ctx, cheekX, cheekY, 3));
         }
 
-        // Mid cheeks (classic cheek area, but biased toward center)
-        for (let i = 3; i <= 5; i++) {
-            const mx = (jaw[i].x + nose[3].x) / 2;
-            const my = (jaw[i].y + nose[3].y) / 2;
-            skinSamples.push(...sampleGrid(ctx, mx, my, 2));
-        }
-        for (let i = 11; i <= 13; i++) {
-            const mx = (jaw[i].x + nose[3].x) / 2;
-            const my = (jaw[i].y + nose[3].y) / 2;
-            skinSamples.push(...sampleGrid(ctx, mx, my, 2));
-        }
-
-        // Chin
-        skinSamples.push(...sampleGrid(ctx, jaw[8].x, jaw[8].y - 8, 2));
-
-        // Use median for robustness, then boost brightness 15%
         let skinColor = medianColor(skinSamples);
         skinColor = mapC(skinColor, 1.15);
         skinColor = clampBrightness(skinColor, 95, 245);
-
         const skinBr = brightnessOf(skinColor);
 
-        // ── Hair color: sample well above eyebrows ──
+        // ── Hair color ──
         const allHairSamples = [];
         const brows = [...leftBrow, ...rightBrow];
         const faceH = jaw[8].y - Math.min(...brows.map(p => p.y));
         const hairOffset = Math.max(35, faceH * 0.65);
 
-        // Sample at multiple offsets for robustness
         for (const offsetMul of [0.8, 1.0, 1.2]) {
             const off = hairOffset * offsetMul;
             for (const p of brows) {
                 const y = p.y - off;
-                if (y > 2) {
-                    allHairSamples.push(...sampleGrid(ctx, p.x, y, 2));
-                }
+                if (y > 2) allHairSamples.push(...sampleGrid(ctx, p.x, y, 2));
             }
         }
 
-        // Also sample to the sides of the head above the ears
-        const headLeft = jaw[0].x;
-        const headRight = jaw[16].x;
-        const browTop = Math.min(...brows.map(p => p.y));
-        for (const xFrac of [0.15, 0.85]) {
-            const x = headLeft + (headRight - headLeft) * xFrac;
-            const y = browTop - hairOffset * 0.5;
-            if (y > 2) allHairSamples.push(...sampleGrid(ctx, x, y, 2));
-        }
-
-        // Use median to ignore background outliers
         let hairColor = allHairSamples.length > 0 ? medianColor(allHairSamples) : { r: 60, g: 40, b: 30 };
-
-        // If hair is too similar to skin, darken it
-        const hairBr = brightnessOf(hairColor);
-        const colorDist = Math.abs(hairColor.r - skinColor.r) + Math.abs(hairColor.g - skinColor.g) + Math.abs(hairColor.b - skinColor.b);
-        if (colorDist < 50) {
+        if (Math.abs(hairColor.r - skinColor.r) + Math.abs(hairColor.g - skinColor.g) + Math.abs(hairColor.b - skinColor.b) < 50) {
             hairColor = mapC(hairColor, 0.55);
         }
         hairColor = clampBrightness(hairColor, 15, 210);
+
+        // ── Refined Expression ──
+        let refinedExpression = 'Normal';
+        if (expression === 'happy') {
+            refinedExpression = expressionScore > 0.85 ? '\u00dcbergl\u00fccklich' : 'Normal lachend';
+        } else if (expression === 'sad') {
+            refinedExpression = expressionScore > 0.7 ? 'Voll traurig' : 'Traurig';
+        } else if (expression === 'neutral') {
+            refinedExpression = 'Neutral';
+        } else {
+            const m = { angry: 'W\u00fctend', fearful: '\u00c4ngstlich', disgusted: 'Angewidert', surprised: '\u00dcberrascht' };
+            refinedExpression = m[expression] || expression;
+        }
+
+        // ── Mustache Detection ──
+        const mustacheZone = [];
+        const noseBottom = nose[6];
+        const mouthTop = mouth[3];
+        for (let t = 0.2; t <= 0.8; t += 0.3) {
+            mustacheZone.push(...sampleGrid(ctx, noseBottom.x, noseBottom.y + (mouthTop.y - noseBottom.y) * t, 2));
+        }
+        const mustacheBr = avgBrightnessOfPts(ctx, mustacheZone);
+        const hasMustache = (mustacheBr < skinBr * 0.78);
+
+        // ── Teeth Detection ──
+        let showsTeeth = false;
+        if (expression === 'happy') {
+            const innerMouthPts = [];
+            const mCenter = { x: (mouth[12].x + mouth[16].x) / 2, y: (mouth[12].y + mouth[16].y) / 2 };
+            innerMouthPts.push(...sampleGrid(ctx, mCenter.x, mCenter.y, 2));
+            showsTeeth = avgBrightnessOfPts(ctx, innerMouthPts) > skinBr * 0.8 || avgBrightnessOfPts(ctx, innerMouthPts) > 160;
+        }
+
+        // ── Nose Shape ──
+        const noseWidth = Math.abs(nose[4].x - nose[0].x);
+        const noseHeight = Math.abs(nose[3].y - nose[0].y);
+        const noseShape = (noseWidth / (noseHeight || 1)) > 1.3 ? 'breit' : 'schmal/kurz';
+
+        // ── Earring Detection ──
+        const earringPts = [];
+        earringPts.push(...sampleGrid(ctx, jaw[0].x - 5, jaw[0].y + 5, 2));
+        earringPts.push(...sampleGrid(ctx, jaw[16].x + 5, jaw[16].y + 5, 2));
+        const hasEarrings = Math.abs(avgBrightnessOfPts(ctx, earringPts) - skinBr) > 40;
 
         // ── Glasses detection ──
         const glasses = detectGlasses(ctx, lm, skinBr);
 
         return {
-            age, gender, genderProb, expression,
+            age, gender, genderProb, expression, refinedExpression,
             skinColor, hairColor,
             skinHex: rgbHex(skinColor),
             hairHex: rgbHex(hairColor),
-            glasses,
+            glasses, hasMustache, showsTeeth, noseShape, hasEarrings
         };
     }
 
     /* ── Glasses Detection ── */
     function detectGlasses(ctx, landmarks, skinBr) {
-        const le = landmarks.getLeftEye();
-        const re = landmarks.getRightEye();
-        const lb = landmarks.getLeftEyeBrow();
-        const rb = landmarks.getRightEyeBrow();
-
+        const le = landmarks.getLeftEye(), re = landmarks.getRightEye();
+        const lb = landmarks.getLeftEyeBrow(), rb = landmarks.getRightEyeBrow();
         function box(pts) {
             let x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity;
-            for (const p of pts) {
-                x1 = Math.min(x1, p.x); y1 = Math.min(y1, p.y);
-                x2 = Math.max(x2, p.x); y2 = Math.max(y2, p.y);
-            }
+            for (const p of pts) { x1 = Math.min(x1, p.x); y1 = Math.min(y1, p.y); x2 = Math.max(x2, p.x); y2 = Math.max(y2, p.y); }
             return { x1, y1, x2, y2, cx: (x1+x2)/2, cy: (y1+y2)/2, w: x2-x1, h: y2-y1 };
         }
-
-        const lBox = box(le), rBox = box(re);
-        const lbBox = box(lb), rbBox = box(rb);
-
-        // 1) Top frame zone: between eyebrow bottom and eye top
+        const lBox = box(le), rBox = box(re), lbBox = box(lb), rbBox = box(rb);
         const topPts = [];
         for (const [eB, bB] of [[lBox, lbBox], [rBox, rbBox]]) {
             const y = (bB.y2 + eB.y1) / 2;
-            for (let x = eB.x1 - 4; x <= eB.x2 + 4; x += 2) {
-                topPts.push({ x, y });
-                topPts.push({ x, y: y + 2 });
-            }
+            for (let x = eB.x1 - 4; x <= eB.x2 + 4; x += 2) topPts.push({ x, y }, { x, y: y + 2 });
         }
-
-        // 2) Bottom frame zone: below each eye
-        const botPts = [];
-        for (const eB of [lBox, rBox]) {
-            for (let dy = 3; dy <= 12; dy += 3) {
-                for (let x = eB.x1 - 2; x <= eB.x2 + 2; x += 2) {
-                    botPts.push({ x, y: eB.y2 + dy });
-                }
-            }
-        }
-
-        // 3) Bridge zone: between inner eye corners
         const bridgePts = [];
-        // le[3] = inner corner left eye, re[0] = inner corner right eye
         const lInner = le[3], rInner = re[0];
-        for (let t = 0.1; t <= 0.9; t += 0.08) {
-            const x = lInner.x + (rInner.x - lInner.x) * t;
-            const y = lInner.y + (rInner.y - lInner.y) * t;
-            bridgePts.push({ x, y: y - 4 });
-            bridgePts.push({ x, y: y - 1 });
-            bridgePts.push({ x, y: y + 2 });
-        }
+        for (let t = 0.1; t <= 0.9; t += 0.1) bridgePts.push({ x: lInner.x + (rInner.x - lInner.x) * t, y: lInner.y + (rInner.y - lInner.y) * t - 2 });
+        
+        const topRatio = avgBrightnessOfPts(ctx, topPts) / Math.max(skinBr, 1);
+        const bridgeRatio = avgBrightnessOfPts(ctx, bridgePts) / Math.max(skinBr, 1);
+        const hasGlasses = (topRatio < 0.72 || bridgeRatio < 0.72);
 
-        // 4) Side frame: outer edges of eyes
-        const sidePts = [];
-        // Outer corner left eye = le[0], outer corner right eye = re[3]
-        for (let dy = -6; dy <= 6; dy += 2) {
-            sidePts.push({ x: le[0].x - 5, y: le[0].y + dy });
-            sidePts.push({ x: le[0].x - 8, y: le[0].y + dy });
-            sidePts.push({ x: re[3].x + 5, y: re[3].y + dy });
-            sidePts.push({ x: re[3].x + 8, y: re[3].y + dy });
-        }
+        if (!hasGlasses) return { hasGlasses: false, shape: null, colorHex: null };
 
-        const topBr = avgBrightnessOfPts(ctx, topPts);
-        const botBr = avgBrightnessOfPts(ctx, botPts);
-        const bridgeBr = avgBrightnessOfPts(ctx, bridgePts);
-        const sideBr = avgBrightnessOfPts(ctx, sidePts);
-
-        // Compare each zone against skin brightness
-        const topRatio = topBr / Math.max(skinBr, 1);
-        const botRatio = botBr / Math.max(skinBr, 1);
-        const bridgeRatio = bridgeBr / Math.max(skinBr, 1);
-        const sideRatio = sideBr / Math.max(skinBr, 1);
-
-        // Score: how many zones are significantly darker than skin?
-        const thr = 0.70;
-        const darkZones = [topRatio < thr, botRatio < thr, bridgeRatio < thr, sideRatio < thr];
-        const darkCount = darkZones.filter(Boolean).length;
-
-        // Need at least 2 dark zones (bridge almost always dark with glasses)
-        const hasGlasses = darkCount >= 2;
-
-        if (!hasGlasses) {
-            return { hasGlasses: false, shape: null, colorHex: null };
-        }
-
-        // ── Shape detection ──
-        // Measure vertical extent of frame below eyes vs horizontal width
-        // Sample downward from eye bottom to find where frame ends
-        let frameBottomExtent = 0;
-        for (const eB of [lBox, rBox]) {
-            for (let dy = 2; dy <= 25; dy += 1) {
-                const pts = [];
-                for (let x = eB.x1; x <= eB.x2; x += 3) {
-                    pts.push({ x, y: eB.y2 + dy });
-                }
-                const br = avgBrightnessOfPts(ctx, pts);
-                if (br / Math.max(skinBr, 1) < 0.75) {
-                    frameBottomExtent = Math.max(frameBottomExtent, dy);
-                } else {
-                    break;
-                }
-            }
-        }
-
-        const avgEyeW = (lBox.w + rBox.w) / 2;
-        const avgEyeH = (lBox.h + rBox.h) / 2;
-        const glassW = avgEyeW + 10;
-        const glassH = avgEyeH + frameBottomExtent + 4;
-        const aspectRatio = glassW / Math.max(glassH, 1);
-
-        let shape;
-        if (aspectRatio > 1.7) shape = 'eckig';
-        else if (aspectRatio < 1.15) shape = 'rund';
-        else shape = 'oval';
-
-        // ── Frame color ──
-        const allFramePts = [...topPts, ...bridgePts, ...sidePts];
-        // Filter to only the darker pixels (actual frame, not skin showing through)
-        const darkFramePts = allFramePts.filter(p => {
-            const x = Math.max(0, Math.min(Math.round(p.x), ctx.canvas.width - 1));
-            const y = Math.max(0, Math.min(Math.round(p.y), ctx.canvas.height - 1));
-            const d = ctx.getImageData(x, y, 1, 1).data;
-            return (d[0] + d[1] + d[2]) / 3 < skinBr * 0.72;
-        });
-
-        const frameColor = darkFramePts.length > 3
-            ? avgColorOfPts(ctx, darkFramePts)
-            : { r: 50, g: 50, b: 50 };
-
-        return {
-            hasGlasses: true,
-            shape,
-            color: frameColor,
-            colorHex: rgbHex(frameColor),
-        };
+        const glassW = (lBox.w + rBox.w) / 2 + 10, glassH = (lBox.h + rBox.h) / 2 + 10;
+        const ar = glassW / Math.max(glassH, 1);
+        const shape = ar > 1.6 ? 'eckig' : ar < 1.2 ? 'rund' : 'oval';
+        const frameColor = avgColorOfPts(ctx, bridgePts);
+        return { hasGlasses: true, shape, color: frameColor, colorHex: rgbHex(frameColor) };
     }
 
     /* ── Glasses SVG Renderer ── */
@@ -622,231 +524,114 @@
         if (!f.glasses || !f.glasses.hasGlasses) return '';
         const gc = f.glasses.colorHex || '#333';
         const shape = f.glasses.shape || 'oval';
-        const sw = style === 'minimal' ? 1.8 : 2.2;
-        const midX = (lx + rx) / 2;
+        const sw = 2.2, midX = (lx + rx) / 2;
         let s = '';
-
-        // Lens tint
-        const tint = `fill="${gc}" fill-opacity="0.07"`;
-
+        const tint = `fill="${gc}" fill-opacity="0.08"`;
         if (shape === 'rund') {
-            const r = style === 'minimal' ? 11 : style === 'geo' ? 13 : 13;
-            s += `<circle cx="${lx}" cy="${ey}" r="${r}" ${tint} stroke="${gc}" stroke-width="${sw}"/>`;
-            s += `<circle cx="${rx}" cy="${ey}" r="${r}" ${tint} stroke="${gc}" stroke-width="${sw}"/>`;
+            s += `<circle cx="${lx}" cy="${ey}" r="13" ${tint} stroke="${gc}" stroke-width="${sw}"/>`;
+            s += `<circle cx="${rx}" cy="${ey}" r="13" ${tint} stroke="${gc}" stroke-width="${sw}"/>`;
         } else if (shape === 'eckig') {
-            const w = style === 'minimal' ? 24 : 28;
-            const h = style === 'minimal' ? 16 : 18;
-            const rr = style === 'geo' ? 2 : 3;
-            s += `<rect x="${lx-w/2}" y="${ey-h/2}" width="${w}" height="${h}" rx="${rr}" ${tint} stroke="${gc}" stroke-width="${sw}"/>`;
-            s += `<rect x="${rx-w/2}" y="${ey-h/2}" width="${w}" height="${h}" rx="${rr}" ${tint} stroke="${gc}" stroke-width="${sw}"/>`;
+            s += `<rect x="${lx-14}" y="${ey-9}" width="28" height="18" rx="2" ${tint} stroke="${gc}" stroke-width="${sw}"/>`;
+            s += `<rect x="${rx-14}" y="${ey-9}" width="28" height="18" rx="2" ${tint} stroke="${gc}" stroke-width="${sw}"/>`;
         } else {
-            const erx = style === 'minimal' ? 13 : 15;
-            const ery = style === 'minimal' ? 10 : 11;
-            s += `<ellipse cx="${lx}" cy="${ey}" rx="${erx}" ry="${ery}" ${tint} stroke="${gc}" stroke-width="${sw}"/>`;
-            s += `<ellipse cx="${rx}" cy="${ey}" rx="${erx}" ry="${ery}" ${tint} stroke="${gc}" stroke-width="${sw}"/>`;
+            s += `<ellipse cx="${lx}" cy="${ey}" rx="15" ry="11" ${tint} stroke="${gc}" stroke-width="${sw}"/>`;
+            s += `<ellipse cx="${rx}" cy="${ey}" rx="15" ry="11" ${tint} stroke="${gc}" stroke-width="${sw}"/>`;
         }
-
-        // Bridge
-        const bx1 = lx + (shape === 'rund' ? 13 : shape === 'eckig' ? 14 : 15);
-        const bx2 = rx - (shape === 'rund' ? 13 : shape === 'eckig' ? 14 : 15);
-        s += `<path d="M${bx1} ${ey-1} Q${midX} ${ey-4} ${bx2} ${ey-1}" stroke="${gc}" stroke-width="${sw*0.8}" fill="none" stroke-linecap="round"/>`;
-
-        // Temple arms
-        if (style !== 'minimal') {
-            const armOff = shape === 'rund' ? 13 : shape === 'eckig' ? 14 : 15;
-            s += `<line x1="${lx-armOff}" y1="${ey-1}" x2="${lx-armOff-10}" y2="${ey-4}" stroke="${gc}" stroke-width="${sw*0.7}" stroke-linecap="round"/>`;
-            s += `<line x1="${rx+armOff}" y1="${ey-1}" x2="${rx+armOff+10}" y2="${ey-4}" stroke="${gc}" stroke-width="${sw*0.7}" stroke-linecap="round"/>`;
-        }
-
+        s += `<path d="M${lx+13} ${ey-1} Q${midX} ${ey-4} ${rx-13} ${ey-1}" stroke="${gc}" stroke-width="${sw*0.8}" fill="none"/>`;
         return s;
     }
 
     /* ── Avatar: Cartoon ── */
     function generateCartoonAvatar(f) {
-        const sk = f.skinHex, skD = brighten(sk, 0.82);
-        const hr = f.hairHex, hrD = brighten(hr, 0.7);
-        const bg = pickBg(sk + 'cartoon');
-        const cl = pickCloth(hr + sk + 'cartoon');
+        const sk = f.skinHex, skD = brighten(sk, 0.82), hr = f.hairHex, hrD = brighten(hr, 0.7);
+        const bg = pickBg(sk + 'cartoon'), cl = pickCloth(hr + sk + 'cartoon');
         const fem = f.gender === 'female' && f.genderProb > 0.55;
-        const ex = f.expression;
         let s = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">`;
         s += `<rect width="200" height="200" rx="16" fill="${bg}"/>`;
-        // Hair back
-        if (fem) {
-            s += `<ellipse cx="100" cy="88" rx="63" ry="68" fill="${hr}"/>`;
-            s += `<rect x="39" y="88" width="20" height="55" rx="10" fill="${hr}"/>`;
-            s += `<rect x="141" y="88" width="20" height="55" rx="10" fill="${hr}"/>`;
-        }
-        // Neck
+        if (fem) { s += `<ellipse cx="100" cy="88" rx="63" ry="68" fill="${hr}"/><rect x="39" y="88" width="20" height="55" rx="10" fill="${hr}"/><rect x="141" y="88" width="20" height="55" rx="10" fill="${hr}"/>`; }
         s += `<rect x="88" y="142" width="24" height="22" rx="5" fill="${sk}"/>`;
-        // Body
         s += `<ellipse cx="100" cy="188" rx="52" ry="30" fill="${cl}"/>`;
-        // Ears
         s += `<ellipse cx="44" cy="98" rx="8" ry="12" fill="${sk}"/>`;
-        s += `<ellipse cx="44" cy="98" rx="5" ry="8" fill="${skD}" opacity="0.25"/>`;
         s += `<ellipse cx="156" cy="98" rx="8" ry="12" fill="${sk}"/>`;
-        s += `<ellipse cx="156" cy="98" rx="5" ry="8" fill="${skD}" opacity="0.25"/>`;
-        // Head
+        if (f.hasEarrings) { s += `<circle cx="44" cy="108" r="3" fill="#ffd700"/><circle cx="156" cy="108" r="3" fill="#ffd700"/>`; }
         s += `<ellipse cx="100" cy="95" rx="55" ry="60" fill="${sk}"/>`;
-        // Hair front
-        if (fem) {
-            s += `<path d="M48 88 Q48 36 100 28 Q152 36 152 88 Q146 52 100 44 Q54 52 48 88Z" fill="${hr}"/>`;
-            s += `<path d="M55 78 Q62 52 82 45 Q66 62 58 78Z" fill="${hrD}" opacity="0.4"/>`;
-        } else {
-            s += `<path d="M50 88 Q50 38 100 30 Q150 38 150 88 Q146 54 100 45 Q54 54 50 88Z" fill="${hr}"/>`;
-            s += `<path d="M52 82 Q56 55 75 44 Q60 60 54 78Z" fill="${hrD}" opacity="0.35"/>`;
-        }
-        // Eyebrows
-        const ba = ex==='angry'?5 : ex==='sad'?-3 : ex==='surprised'?-6 : 0;
+        s += `<path d="M50 88 Q50 38 100 30 Q150 38 150 88 Q146 54 100 45 Q54 54 50 88Z" fill="${hr}"/>`;
+        const ba = f.expression==='angry'?5 : f.expression==='sad'?-3 : 0;
         s += `<line x1="68" y1="${78-ba}" x2="88" y2="${78+ba}" stroke="${hrD}" stroke-width="2.5" stroke-linecap="round"/>`;
         s += `<line x1="112" y1="${78+ba}" x2="132" y2="${78-ba}" stroke="${hrD}" stroke-width="2.5" stroke-linecap="round"/>`;
-        // Eyes
         const ey = 90;
-        if (ex === 'happy') {
-            s += `<path d="M72 ${ey} Q79 ${ey-7} 86 ${ey}" stroke="#333" stroke-width="2.5" fill="none" stroke-linecap="round"/>`;
-            s += `<path d="M114 ${ey} Q121 ${ey-7} 128 ${ey}" stroke="#333" stroke-width="2.5" fill="none" stroke-linecap="round"/>`;
-        } else if (ex === 'surprised') {
-            s += `<circle cx="79" cy="${ey}" r="7" fill="white" stroke="#333" stroke-width="1.5"/>`;
-            s += `<circle cx="79" cy="${ey+1}" r="4" fill="#333"/>`;
-            s += `<circle cx="121" cy="${ey}" r="7" fill="white" stroke="#333" stroke-width="1.5"/>`;
-            s += `<circle cx="121" cy="${ey+1}" r="4" fill="#333"/>`;
-        } else {
-            s += `<ellipse cx="79" cy="${ey}" rx="6" ry="5.5" fill="white" stroke="#333" stroke-width="1"/>`;
-            s += `<circle cx="80" cy="${ey}" r="3" fill="#333"/>`;
-            s += `<circle cx="81" cy="${ey-1}" r="1" fill="white"/>`;
-            s += `<ellipse cx="121" cy="${ey}" rx="6" ry="5.5" fill="white" stroke="#333" stroke-width="1"/>`;
-            s += `<circle cx="120" cy="${ey}" r="3" fill="#333"/>`;
-            s += `<circle cx="121" cy="${ey-1}" r="1" fill="white"/>`;
-        }
-        // Glasses
+        s += `<ellipse cx="79" cy="${ey}" rx="6" ry="5.5" fill="white" stroke="#333" stroke-width="1"/><circle cx="80" cy="${ey}" r="3" fill="#333"/>`;
+        s += `<ellipse cx="121" cy="${ey}" rx="6" ry="5.5" fill="white" stroke="#333" stroke-width="1"/><circle cx="120" cy="${ey}" r="3" fill="#333"/>`;
         s += renderGlasses(f, 79, 121, ey, 'cartoon');
-        // Nose
-        s += `<path d="M97 103 Q100 110 103 103" stroke="${skD}" stroke-width="1.5" fill="none" stroke-linecap="round"/>`;
-        // Mouth
-        const my = 118;
-        if (ex === 'happy') {
-            s += `<path d="M82 ${my} Q100 ${my+14} 118 ${my}" stroke="#c0392b" stroke-width="2.2" fill="#e74c3c" fill-opacity="0.25" stroke-linecap="round"/>`;
-        } else if (ex === 'surprised') {
-            s += `<ellipse cx="100" cy="${my+3}" rx="6" ry="8" fill="#333" opacity="0.75"/>`;
-        } else if (ex === 'sad') {
-            s += `<path d="M85 ${my+5} Q100 ${my-2} 115 ${my+5}" stroke="#333" stroke-width="2" fill="none" stroke-linecap="round"/>`;
-        } else if (ex === 'angry') {
-            s += `<line x1="84" y1="${my+2}" x2="116" y2="${my+2}" stroke="#333" stroke-width="2.5" stroke-linecap="round"/>`;
-        } else {
-            s += `<path d="M85 ${my} Q100 ${my+6} 115 ${my}" stroke="#333" stroke-width="2" fill="none" stroke-linecap="round"/>`;
-        }
-        // Blush
-        s += `<circle cx="66" cy="108" r="9" fill="#ff9999" opacity="0.12"/>`;
-        s += `<circle cx="134" cy="108" r="9" fill="#ff9999" opacity="0.12"/>`;
+        const nw = f.noseShape === 'breit' ? 8 : 4;
+        s += `<path d="M${100-nw} 103 Q100 110 ${100+nw} 103" stroke="${skD}" stroke-width="1.5" fill="none" stroke-linecap="round"/>`;
+        if (f.hasMustache) s += `<path d="M85 112 Q100 108 115 112 Q110 118 100 118 Q90 118 85 112" fill="${hrD}"/>`;
+        const my = 120;
+        if (f.expression === 'happy') {
+            if (f.showsTeeth) s += `<path d="M82 ${my} Q100 ${my+15} 118 ${my} Z" fill="white" stroke="#c0392b" stroke-width="1.5"/>`;
+            else s += `<path d="M82 ${my} Q100 ${my+12} 118 ${my}" stroke="#c0392b" stroke-width="2.2" fill="none" stroke-linecap="round"/>`;
+        } else if (f.expression === 'sad') s += `<path d="M85 ${my+5} Q100 ${my-2} 115 ${my+5}" stroke="#333" stroke-width="2" fill="none" stroke-linecap="round"/>`;
+        else s += `<path d="M85 ${my} Q100 ${my+4} 115 ${my}" stroke="#333" stroke-width="2" fill="none" stroke-linecap="round"/>`;
+        s += `</svg>`;
+        return s;
+    }
+
+    /* ── Avatar: Artistic ── */
+    function generateArtisticAvatar(f) {
+        const sk = f.skinHex, hr = f.hairHex, hrD = brighten(hr, 0.6);
+        const bg = '#1a1a2e';
+        let s = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">`;
+        s += `<rect width="200" height="200" rx="16" fill="${bg}"/>`;
+        s += `<path d="M60 40 Q100 20 140 40 L150 140 Q100 170 50 140 Z" fill="${sk}" opacity="0.85"/>`;
+        s += `<path d="M40 60 Q20 20 100 10 Q180 20 160 60 Q180 100 150 140 Q100 130 50 140 Q20 100 40 60" fill="${hr}"/>`;
+        const ey = 85;
+        s += `<line x1="75" y1="${ey}" x2="95" y2="${ey}" stroke="white" stroke-width="3" stroke-linecap="round" opacity="0.6"/>`;
+        s += `<line x1="105" y1="${ey}" x2="125" y2="${ey}" stroke="white" stroke-width="3" stroke-linecap="round" opacity="0.6"/>`;
+        if (f.hasMustache) s += `<path d="M80 115 Q100 110 120 115" stroke="${hrD}" stroke-width="4" fill="none" stroke-linecap="round"/>`;
+        const my = 130;
+        if (f.expression === 'happy') s += `<path d="M85 ${my} Q100 ${my+15} 115 ${my}" stroke="white" stroke-width="2" fill="none" opacity="0.5"/>`;
+        else s += `<line x1="90" y1="${my}" x2="110" y2="${my}" stroke="white" stroke-width="1" opacity="0.3"/>`;
         s += `</svg>`;
         return s;
     }
 
     /* ── Avatar: Minimal ── */
     function generateMinimalAvatar(f) {
-        const sk = f.skinHex;
-        const hr = f.hairHex;
-        const bg = pickBg(sk + 'mini');
-        const cl = pickCloth(hr + sk + 'mini');
+        const sk = f.skinHex, hr = f.hairHex;
+        const bg = pickBg(sk + 'mini'), cl = pickCloth(hr + sk + 'mini');
         const fem = f.gender === 'female' && f.genderProb > 0.55;
-        const ex = f.expression;
         let s = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">`;
         s += `<rect width="200" height="200" rx="100" fill="${bg}"/>`;
-        // Body hint
         s += `<ellipse cx="100" cy="192" rx="40" ry="22" fill="${cl}"/>`;
-        // Neck
         s += `<rect x="92" y="144" width="16" height="14" rx="4" fill="${sk}"/>`;
-        // Hair back
         s += `<circle cx="100" cy="88" r="52" fill="${hr}"/>`;
-        if (fem) {
-            s += `<rect x="50" y="88" width="14" height="42" rx="7" fill="${hr}"/>`;
-            s += `<rect x="136" y="88" width="14" height="42" rx="7" fill="${hr}"/>`;
-        }
-        // Face
+        if (fem) s += `<rect x="50" y="88" width="14" height="42" rx="7" fill="${hr}"/><rect x="136" y="88" width="14" height="42" rx="7" fill="${hr}"/>`;
         s += `<circle cx="100" cy="100" r="44" fill="${sk}"/>`;
-        // Hair top
         s += `<path d="M58 95 Q58 52 100 45 Q142 52 142 95 Q138 65 100 58 Q62 65 58 95Z" fill="${hr}"/>`;
-        // Eyes
-        if (ex === 'happy') {
-            s += `<path d="M80 95 Q85 90 90 95" stroke="#333" stroke-width="2" fill="none" stroke-linecap="round"/>`;
-            s += `<path d="M110 95 Q115 90 120 95" stroke="#333" stroke-width="2" fill="none" stroke-linecap="round"/>`;
-        } else {
-            s += `<circle cx="85" cy="95" r="3" fill="#333"/>`;
-            s += `<circle cx="115" cy="95" r="3" fill="#333"/>`;
-        }
-        // Glasses
+        s += `<circle cx="85" cy="95" r="3" fill="#333"/><circle cx="115" cy="95" r="3" fill="#333"/>`;
         s += renderGlasses(f, 85, 115, 95, 'minimal');
-        // Mouth
-        if (ex === 'happy') {
-            s += `<path d="M88 114 Q100 124 112 114" stroke="#333" stroke-width="1.8" fill="none" stroke-linecap="round"/>`;
-        } else if (ex === 'sad') {
-            s += `<path d="M90 118 Q100 112 110 118" stroke="#333" stroke-width="1.8" fill="none" stroke-linecap="round"/>`;
-        } else {
-            s += `<line x1="90" y1="115" x2="110" y2="115" stroke="#333" stroke-width="1.8" stroke-linecap="round"/>`;
-        }
+        if (f.expression === 'happy') s += `<path d="M88 114 Q100 124 112 114" stroke="#333" stroke-width="1.8" fill="none" stroke-linecap="round"/>`;
+        else s += `<line x1="90" y1="115" x2="110" y2="115" stroke="#333" stroke-width="1.8" stroke-linecap="round"/>`;
         s += `</svg>`;
         return s;
     }
 
     /* ── Avatar: Geometric ── */
     function generateGeoAvatar(f) {
-        const sk = f.skinHex;
-        const hr = f.hairHex, hrD = brighten(hr, 0.65);
-        const bg = pickBg(sk + 'geo');
-        const bgD = brighten(bg, 0.82);
-        const cl = pickCloth(hr + sk + 'geo');
-        const fem = f.gender === 'female' && f.genderProb > 0.55;
-        const ex = f.expression;
+        const sk = f.skinHex, hr = f.hairHex, hrD = brighten(hr, 0.65);
+        const bg = pickBg(sk + 'geo'), cl = pickCloth(hr + sk + 'geo');
         let s = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">`;
-        s += `<defs><linearGradient id="gbg" x1="0%" y1="0%" x2="100%" y2="100%">`;
-        s += `<stop offset="0%" stop-color="${bg}"/><stop offset="100%" stop-color="${bgD}"/>`;
-        s += `</linearGradient></defs>`;
-        s += `<rect width="200" height="200" rx="16" fill="url(#gbg)"/>`;
-        // Deco
-        s += `<rect x="155" y="15" width="22" height="22" rx="4" fill="${cl}" opacity="0.2" transform="rotate(15 166 26)"/>`;
-        s += `<circle cx="30" cy="175" r="10" fill="${cl}" opacity="0.15"/>`;
-        // Body
+        s += `<rect width="200" height="200" rx="16" fill="${bg}"/>`;
         s += `<rect x="55" y="162" width="90" height="38" rx="18" fill="${cl}"/>`;
-        // Neck
         s += `<rect x="90" y="148" width="20" height="18" rx="3" fill="${sk}"/>`;
-        // Hair back
         s += `<rect x="42" y="38" width="116" height="80" rx="28" fill="${hr}"/>`;
-        if (fem) {
-            s += `<rect x="42" y="85" width="16" height="45" rx="8" fill="${hr}"/>`;
-            s += `<rect x="142" y="85" width="16" height="45" rx="8" fill="${hr}"/>`;
-        }
-        // Face
         s += `<rect x="48" y="48" width="104" height="110" rx="26" fill="${sk}"/>`;
-        // Hair front
         s += `<rect x="48" y="38" width="104" height="35" rx="20" fill="${hr}"/>`;
-        s += `<rect x="52" y="52" width="40" height="18" rx="8" fill="${hrD}" opacity="0.3"/>`;
-        // Eyes
-        if (ex === 'happy') {
-            s += `<path d="M74 95 Q80 88 86 95" stroke="#333" stroke-width="2.2" fill="none" stroke-linecap="round"/>`;
-            s += `<path d="M114 95 Q120 88 126 95" stroke="#333" stroke-width="2.2" fill="none" stroke-linecap="round"/>`;
-        } else if (ex === 'surprised') {
-            s += `<rect x="72" y="86" width="16" height="16" rx="3" fill="white" stroke="#333" stroke-width="1.2"/>`;
-            s += `<rect x="77" y="91" width="6" height="6" rx="1" fill="#333"/>`;
-            s += `<rect x="112" y="86" width="16" height="16" rx="3" fill="white" stroke="#333" stroke-width="1.2"/>`;
-            s += `<rect x="117" y="91" width="6" height="6" rx="1" fill="#333"/>`;
-        } else {
-            s += `<rect x="72" y="87" width="16" height="14" rx="4" fill="white" stroke="#333" stroke-width="1"/>`;
-            s += `<circle cx="80" cy="94" r="3.5" fill="#333"/>`;
-            s += `<rect x="112" y="87" width="16" height="14" rx="4" fill="white" stroke="#333" stroke-width="1"/>`;
-            s += `<circle cx="120" cy="94" r="3.5" fill="#333"/>`;
-        }
-        // Glasses
+        s += `<rect x="72" y="87" width="16" height="14" rx="4" fill="white" stroke="#333" stroke-width="1"/><circle cx="80" cy="94" r="3.5" fill="#333"/>`;
+        s += `<rect x="112" y="87" width="16" height="14" rx="4" fill="white" stroke="#333" stroke-width="1"/><circle cx="120" cy="94" r="3.5" fill="#333"/>`;
         s += renderGlasses(f, 80, 120, 94, 'geo');
-        // Nose
-        s += `<polygon points="97,108 100,116 103,108" fill="${brighten(sk, 0.8)}" opacity="0.5"/>`;
-        // Mouth
-        if (ex === 'happy') {
-            s += `<path d="M85 126 Q100 138 115 126" stroke="#333" stroke-width="2" fill="none" stroke-linecap="round"/>`;
-        } else if (ex === 'sad') {
-            s += `<path d="M88 132 Q100 124 112 132" stroke="#333" stroke-width="2" fill="none" stroke-linecap="round"/>`;
-        } else {
-            s += `<rect x="88" y="128" width="24" height="4" rx="2" fill="#333" opacity="0.55"/>`;
-        }
+        if (f.expression === 'happy') s += `<path d="M85 126 Q100 138 115 126" stroke="#333" stroke-width="2" fill="none" stroke-linecap="round"/>`;
+        else s += `<rect x="88" y="128" width="24" height="4" rx="2" fill="#333" opacity="0.55"/>`;
         s += `</svg>`;
         return s;
     }
@@ -855,36 +640,19 @@
     function showResults(photoUrl, features, avatars) {
         const preview = document.getElementById('photo-preview');
         preview.innerHTML = `<img src="${photoUrl}" alt="Dein Foto"/>`;
-
-        const expressionMap = {
-            neutral: 'Neutral', happy: 'Gl\u00fccklich', sad: 'Traurig',
-            angry: 'W\u00fctend', fearful: '\u00c4ngstlich', disgusted: 'Angewidert', surprised: '\u00dcberrascht'
-        };
-
-        const shapeMap = { rund: 'Rund', oval: 'Oval', eckig: 'Eckig/Rechteckig' };
-        const gl = features.glasses;
-
-        let glassesHtml = '';
-        if (gl && gl.hasGlasses) {
-            glassesHtml = `
-                <div class="feature-item"><span class="label">Brille</span><span class="value">Ja</span></div>
-                <div class="feature-item"><span class="label">Brillenform</span><span class="value">${shapeMap[gl.shape] || gl.shape}</span></div>
-                <div class="feature-item"><span class="label">Brillenfarbe</span><span class="value"><span class="color-dot" style="background:${gl.colorHex}"></span>${gl.colorHex}</span></div>
-            `;
-        } else {
-            glassesHtml = `<div class="feature-item"><span class="label">Brille</span><span class="value">Nein</span></div>`;
-        }
-
         const fl = document.getElementById('features-list');
         fl.innerHTML = `
             <div class="feature-item"><span class="label">Alter</span><span class="value">~${features.age} Jahre</span></div>
-            <div class="feature-item"><span class="label">Geschlecht</span><span class="value">${features.gender === 'male' ? 'M\u00e4nnlich' : 'Weiblich'} (${Math.round(features.genderProb * 100)}%)</span></div>
-            <div class="feature-item"><span class="label">Ausdruck</span><span class="value">${expressionMap[features.expression] || features.expression}</span></div>
+            <div class="feature-item"><span class="label">Geschlecht</span><span class="value">${features.gender === 'male' ? 'M\u00e4nnlich' : 'Weiblich'}</span></div>
+            <div class="feature-item"><span class="label">Ausdruck</span><span class="value">${features.refinedExpression}</span></div>
             <div class="feature-item"><span class="label">Hautton</span><span class="value"><span class="color-dot" style="background:${features.skinHex}"></span>${features.skinHex}</span></div>
             <div class="feature-item"><span class="label">Haarfarbe</span><span class="value"><span class="color-dot" style="background:${features.hairHex}"></span>${features.hairHex}</span></div>
-            ${glassesHtml}
+            <div class="feature-item"><span class="label">Brille</span><span class="value">${features.glasses.hasGlasses ? 'Ja ('+features.glasses.shape+')' : 'Nein'}</span></div>
+            <div class="feature-item"><span class="label">Schnurrbart</span><span class="value">${features.hasMustache ? 'Ja' : 'Nein'}</span></div>
+            <div class="feature-item"><span class="label">Ohrringe</span><span class="value">${features.hasEarrings ? 'Ja' : 'Nein'}</span></div>
+            <div class="feature-item"><span class="label">Nase</span><span class="value">${features.noseShape}</span></div>
+            <div class="feature-item"><span class="label">Z\u00e4hne</span><span class="value">${features.showsTeeth ? 'Sichtbar' : 'Nicht sichtbar'}</span></div>
         `;
-
         const grid = document.getElementById('avatar-grid');
         grid.innerHTML = '';
         avatars.forEach((a, i) => {
@@ -897,10 +665,8 @@
             });
             grid.appendChild(card);
         });
-
         document.getElementById('results').style.display = 'block';
     }
-
     function downloadSvg(btn, name) {
         const svg = btn.closest('.avatar-card').querySelector('svg').outerHTML;
         const blob = new Blob([svg], { type: 'image/svg+xml' });
