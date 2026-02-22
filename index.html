@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Webcam2Avatar</title>
+    <script defer src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            background: #0a0a1a;
+            color: #e0e0e0;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 2rem 1rem;
+        }
+        h1 { font-size: 2rem; margin-bottom: 0.25rem; }
+        .subtitle { color: #888; margin-bottom: 2rem; font-size: 0.95rem; }
+        #camera-section {
+            position: relative;
+            width: 100%;
+            max-width: 480px;
+            border-radius: 16px;
+            overflow: hidden;
+            background: #111;
+            aspect-ratio: 4/3;
+        }
+        #video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transform: scaleX(-1);
+            display: block;
+        }
+        #snapshot-canvas { display: none; }
+        #controls { margin-top: 1.5rem; display: flex; gap: 1rem; }
+        button {
+            padding: 0.75rem 1.5rem;
+            border: none;
+            border-radius: 10px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        button:disabled { opacity: 0.4; cursor: not-allowed; }
+        #capture-btn {
+            background: #6c5ce7;
+            color: white;
+        }
+        #capture-btn:hover:not(:disabled) { background: #5a4bd1; transform: scale(1.03); }
+        #retry-btn {
+            background: #2d3436;
+            color: #dfe6e9;
+        }
+        #retry-btn:hover { background: #3d4446; }
+        #status {
+            margin-top: 1.25rem;
+            padding: 0.6rem 1.2rem;
+            background: #161625;
+            border-radius: 8px;
+            font-size: 0.9rem;
+            color: #a0a0c0;
+            min-height: 2.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        #status.error { color: #e74c3c; background: #1a0a0a; }
+        #status.success { color: #2ecc71; }
+        .spinner {
+            width: 16px; height: 16px;
+            border: 2px solid #444;
+            border-top-color: #6c5ce7;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            flex-shrink: 0;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        #results {
+            display: none;
+            width: 100%;
+            max-width: 720px;
+            margin-top: 2rem;
+        }
+        #features-panel {
+            background: #161625;
+            border-radius: 12px;
+            padding: 1.25rem;
+            margin-bottom: 1.5rem;
+        }
+        #features-panel h3 { margin-bottom: 0.75rem; font-size: 1rem; color: #b0b0d0; }
+        .features-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+            gap: 0.5rem;
+        }
+        .feature-item {
+            background: #1e1e35;
+            padding: 0.5rem 0.75rem;
+            border-radius: 8px;
+            font-size: 0.85rem;
+        }
+        .feature-item .label { color: #777; font-size: 0.75rem; display: block; }
+        .feature-item .value { color: #e0e0e0; font-weight: 500; }
+        .color-dot {
+            display: inline-block;
+            width: 12px; height: 12px;
+            border-radius: 50%;
+            vertical-align: middle;
+            margin-right: 4px;
+            border: 1px solid #444;
+        }
+        #avatars-panel h3 {
+            font-size: 1rem;
+            color: #b0b0d0;
+            margin-bottom: 1rem;
+        }
+        .avatar-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 1rem;
+        }
+        .avatar-card {
+            background: #161625;
+            border-radius: 12px;
+            padding: 1rem;
+            text-align: center;
+            cursor: pointer;
+            border: 2px solid transparent;
+            transition: all 0.2s;
+        }
+        .avatar-card:hover { border-color: #6c5ce7; transform: translateY(-2px); }
+        .avatar-card.selected { border-color: #6c5ce7; background: #1e1e35; }
+        .avatar-card svg { width: 100%; height: auto; border-radius: 8px; }
+        .avatar-card .style-name {
+            margin-top: 0.5rem;
+            font-size: 0.8rem;
+            color: #888;
+        }
+        .avatar-card .dl-btn {
+            margin-top: 0.5rem;
+            padding: 0.35rem 0.7rem;
+            font-size: 0.75rem;
+            background: #6c5ce7;
+            color: white;
+            border-radius: 6px;
+            display: none;
+        }
+        .avatar-card.selected .dl-btn { display: inline-block; }
+        .avatar-card .dl-btn:hover { background: #5a4bd1; }
+        #photo-preview {
+            text-align: center;
+            margin-bottom: 1.5rem;
+        }
+        #photo-preview img {
+            max-width: 200px;
+            border-radius: 12px;
+            transform: scaleX(-1);
+            border: 2px solid #2d2d4a;
+        }
+        @media (max-width: 600px) {
+            .avatar-grid { grid-template-columns: 1fr 1fr; }
+            .features-grid { grid-template-columns: 1fr 1fr; }
+            body { padding: 1rem 0.75rem; }
+        }
+    </style>
+</head>
+<body>
+    <h1>Webcam2Avatar</h1>
+    <p class="subtitle">Foto machen &rarr; Gesicht analysieren &rarr; Avatar generieren</p>
+
+    <div id="camera-section">
+        <video id="video" autoplay playsinline muted></video>
+    </div>
+    <canvas id="snapshot-canvas"></canvas>
+
+    <div id="controls">
+        <button id="capture-btn" disabled>Foto aufnehmen</button>
+        <button id="retry-btn" style="display:none">Neues Foto</button>
+    </div>
+
+    <div id="status"><div class="spinner"></div><span>Initialisiere...</span></div>
+
+    <div id="results">
+        <div id="photo-preview"></div>
+        <div id="features-panel">
+            <h3>Erkannte Merkmale</h3>
+            <div id="features-list" class="features-grid"></div>
+        </div>
+        <div id="avatars-panel">
+            <h3>Deine Avatar-Vorschl&auml;ge</h3>
+            <div id="avatar-grid" class="avatar-grid"></div>
+        </div>
+    </div>
+
+    <script>
+    document.addEventListener('DOMContentLoaded', () => { init(); });
+
+    const MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model';
+    let videoStream = null;
+
+    /* ── Init ── */
+    async function init() {
+        try {
+            setStatus('Lade Gesichtserkennungs-Modelle... (1/4)', true);
+            await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
+            setStatus('Lade Modelle... (2/4)', true);
+            await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
+            setStatus('Lade Modelle... (3/4)', true);
+            await faceapi.nets.faceExpressionNet.loadFromUri(MODEL_URL);
+            setStatus('Lade Modelle... (4/4)', true);
+            await faceapi.nets.ageGenderNet.loadFromUri(MODEL_URL);
+            setStatus('Starte Kamera...', true);
+            await startCamera();
+            setStatus('Bereit! Klicke auf "Foto aufnehmen".', false, 'success');
+            document.getElementById('capture-btn').disabled = false;
+        } catch (e) {
+            setStatus('Fehler: ' + e.message, false, 'error');
+        }
+    }
+
+    /* ── Camera ── */
+    async function startCamera() {
+        videoStream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }
+        });
+        const video = document.getElementById('video');
+        video.srcObject = videoStream;
+        video.style.display = 'block';
+        await new Promise(r => { video.onloadeddata = r; });
+    }
+
+    function stopCamera() {
+        if (videoStream) {
+            videoStream.getTracks().forEach(t => t.stop());
+            videoStream = null;
+        }
+    }
+
+    /* ── Capture & Analyze ── */
+    async function capture() {
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('snapshot-canvas');
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(video, 0, 0);
+
+        stopCamera();
+        video.style.display = 'none';
+        document.getElementById('capture-btn').style.display = 'none';
+        document.getElementById('retry-btn').style.display = 'inline-block';
+
+        setStatus('Analysiere Gesicht...', true);
+
+        const detection = await faceapi
+            .detectSingleFace(canvas, new faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.4 }))
+            .withFaceLandmarks()
+            .withFaceExpressions()
+            .withAgeAndGender();
+
+        if (!detection) {
+            setStatus('Kein Gesicht erkannt. Bitte versuche es erneut.', false, 'error');
+            return;
+        }
+
+        setStatus('Erstelle Avatare...', true);
+        const features = extractFeatures(detection, ctx);
+        const avatars = [
+            { name: 'Cartoon', svg: generateCartoonAvatar(features) },
+            { name: 'Minimal', svg: generateMinimalAvatar(features) },
+            { name: 'Geo', svg: generateGeoAvatar(features) },
+        ];
+        showResults(canvas.toDataURL('image/jpeg', 0.85), features, avatars);
+        setStatus('Fertig!', false, 'success');
+    }
+
+    async function retry() {
+        document.getElementById('results').style.display = 'none';
+        document.getElementById('video').style.display = 'block';
+        document.getElementById('capture-btn').style.display = 'inline-block';
+        document.getElementById('capture-btn').disabled = true;
+        document.getElementById('retry-btn').style.display = 'none';
+        setStatus('Starte Kamera...', true);
+        await startCamera();
+        setStatus('Bereit!', false, 'success');
+        document.getElementById('capture-btn').disabled = false;
+    }
+
+    /* ── Feature Extraction ── */
+    function extractFeatures(det, ctx) {
+        const lm = det.landmarks;
+        const age = Math.round(det.age);
+        const gender = det.gender;
+        const genderProb = det.genderProbability;
+
+        const exprs = det.expressions;
+        const expression = Object.entries(exprs).sort((a, b) => b[1] - a[1])[0][0];
+
+        const jaw = lm.getJawOutline();
+        const nose = lm.getNose();
+        const leftBrow = lm.getLeftEyeBrow();
+        const rightBrow = lm.getRightEyeBrow();
+
+        // Skin: sample from cheek areas
+        const cheekPts = [];
+        for (let i = 2; i <= 5; i++) {
+            cheekPts.push({ x: (jaw[i].x + nose[0].x) / 2, y: (jaw[i].y + nose[0].y) / 2 });
+        }
+        for (let i = 11; i <= 14; i++) {
+            cheekPts.push({ x: (jaw[i].x + nose[0].x) / 2, y: (jaw[i].y + nose[0].y) / 2 });
+        }
+        let skinColor = avgColor(ctx, cheekPts);
+        skinColor = clampBrightness(skinColor, 70, 240);
+
+        // Hair: sample above eyebrows
+        const hairPts = [];
+        const brows = [...leftBrow, ...rightBrow];
+        const faceH = jaw[8].y - brows[0].y;
+        const offset = Math.max(30, faceH * 0.5);
+        for (const p of brows) {
+            const y = p.y - offset;
+            if (y > 0) hairPts.push({ x: p.x, y });
+        }
+        let hairColor = hairPts.length > 0 ? avgColor(ctx, hairPts) : { r: 60, g: 40, b: 30 };
+        hairColor = clampBrightness(hairColor, 15, 220);
+
+        return {
+            age, gender, genderProb, expression,
+            skinColor, hairColor,
+            skinHex: rgbHex(skinColor),
+            hairHex: rgbHex(hairColor),
+        };
+    }
+
+    function avgColor(ctx, pts) {
+        let r = 0, g = 0, b = 0, n = 0;
+        const w = ctx.canvas.width, h = ctx.canvas.height;
+        for (const p of pts) {
+            const x = Math.max(0, Math.min(Math.round(p.x), w - 1));
+            const y = Math.max(0, Math.min(Math.round(p.y), h - 1));
+            const d = ctx.getImageData(x, y, 1, 1).data;
+            r += d[0]; g += d[1]; b += d[2]; n++;
+        }
+        return n ? { r: Math.round(r / n), g: Math.round(g / n), b: Math.round(b / n) } : { r: 180, g: 150, b: 130 };
+    }
+
+    function clampBrightness(c, lo, hi) {
+        const br = (c.r + c.g + c.b) / 3;
+        if (br < lo) { const f = lo / Math.max(br, 1); return mapC(c, f); }
+        if (br > hi) { const f = hi / br; return mapC(c, f); }
+        return c;
+    }
+    function mapC(c, f) {
+        return { r: Math.min(255, Math.round(c.r * f)), g: Math.min(255, Math.round(c.g * f)), b: Math.min(255, Math.round(c.b * f)) };
+    }
+
+    /* ── Color Helpers ── */
+    function rgbHex(c) { return '#' + [c.r, c.g, c.b].map(v => v.toString(16).padStart(2, '0')).join(''); }
+    function brighten(hex, f) {
+        const c = hexRgb(hex);
+        return rgbHex({ r: Math.min(255, Math.round(c.r * f)), g: Math.min(255, Math.round(c.g * f)), b: Math.min(255, Math.round(c.b * f)) });
+    }
+    function hexRgb(h) { return { r: parseInt(h.slice(1,3),16), g: parseInt(h.slice(3,5),16), b: parseInt(h.slice(5,7),16) }; }
+    function hashStr(s) { let h = 0; for (let i = 0; i < s.length; i++) { h = ((h << 5) - h) + s.charCodeAt(i); h |= 0; } return h; }
+
+    const BG_COLORS = ['#dfe6e9','#dff9fb','#ffeaa7','#fab1a0','#a29bfe','#55efc4','#74b9ff','#fd79a8','#f5f6fa'];
+    const CLOTH_COLORS = ['#3498db','#2ecc71','#e74c3c','#9b59b6','#f39c12','#1abc9c','#34495e','#e67e22'];
+
+    function pickBg(seed) { return BG_COLORS[Math.abs(hashStr(seed)) % BG_COLORS.length]; }
+    function pickCloth(seed) { return CLOTH_COLORS[Math.abs(hashStr(seed)) % CLOTH_COLORS.length]; }
+
+    /* ── Avatar: Cartoon ── */
+    function generateCartoonAvatar(f) {
+        const sk = f.skinHex, skD = brighten(sk, 0.82);
+        const hr = f.hairHex, hrD = brighten(hr, 0.7);
+        const bg = pickBg(sk + 'cartoon');
+        const cl = pickCloth(hr + sk + 'cartoon');
+        const fem = f.gender === 'female' && f.genderProb > 0.55;
+        const ex = f.expression;
+        let s = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">`;
+        s += `<rect width="200" height="200" rx="16" fill="${bg}"/>`;
+        // Hair back
+        if (fem) {
+            s += `<ellipse cx="100" cy="88" rx="63" ry="68" fill="${hr}"/>`;
+            s += `<rect x="39" y="88" width="20" height="55" rx="10" fill="${hr}"/>`;
+            s += `<rect x="141" y="88" width="20" height="55" rx="10" fill="${hr}"/>`;
+        }
+        // Neck
+        s += `<rect x="88" y="142" width="24" height="22" rx="5" fill="${sk}"/>`;
+        // Body
+        s += `<ellipse cx="100" cy="188" rx="52" ry="30" fill="${cl}"/>`;
+        // Ears
+        s += `<ellipse cx="44" cy="98" rx="8" ry="12" fill="${sk}"/>`;
+        s += `<ellipse cx="44" cy="98" rx="5" ry="8" fill="${skD}" opacity="0.25"/>`;
+        s += `<ellipse cx="156" cy="98" rx="8" ry="12" fill="${sk}"/>`;
+        s += `<ellipse cx="156" cy="98" rx="5" ry="8" fill="${skD}" opacity="0.25"/>`;
+        // Head
+        s += `<ellipse cx="100" cy="95" rx="55" ry="60" fill="${sk}"/>`;
+        // Hair front
+        if (fem) {
+            s += `<path d="M48 88 Q48 36 100 28 Q152 36 152 88 Q146 52 100 44 Q54 52 48 88Z" fill="${hr}"/>`;
+            s += `<path d="M55 78 Q62 52 82 45 Q66 62 58 78Z" fill="${hrD}" opacity="0.4"/>`;
+        } else {
+            s += `<path d="M50 88 Q50 38 100 30 Q150 38 150 88 Q146 54 100 45 Q54 54 50 88Z" fill="${hr}"/>`;
+            s += `<path d="M52 82 Q56 55 75 44 Q60 60 54 78Z" fill="${hrD}" opacity="0.35"/>`;
+        }
+        // Eyebrows
+        const ba = ex==='angry'?5 : ex==='sad'?-3 : ex==='surprised'?-6 : 0;
+        s += `<line x1="68" y1="${78-ba}" x2="88" y2="${78+ba}" stroke="${hrD}" stroke-width="2.5" stroke-linecap="round"/>`;
+        s += `<line x1="112" y1="${78+ba}" x2="132" y2="${78-ba}" stroke="${hrD}" stroke-width="2.5" stroke-linecap="round"/>`;
+        // Eyes
+        const ey = 90;
+        if (ex === 'happy') {
+            s += `<path d="M72 ${ey} Q79 ${ey-7} 86 ${ey}" stroke="#333" stroke-width="2.5" fill="none" stroke-linecap="round"/>`;
+            s += `<path d="M114 ${ey} Q121 ${ey-7} 128 ${ey}" stroke="#333" stroke-width="2.5" fill="none" stroke-linecap="round"/>`;
+        } else if (ex === 'surprised') {
+            s += `<circle cx="79" cy="${ey}" r="7" fill="white" stroke="#333" stroke-width="1.5"/>`;
+            s += `<circle cx="79" cy="${ey+1}" r="4" fill="#333"/>`;
+            s += `<circle cx="121" cy="${ey}" r="7" fill="white" stroke="#333" stroke-width="1.5"/>`;
+            s += `<circle cx="121" cy="${ey+1}" r="4" fill="#333"/>`;
+        } else {
+            s += `<ellipse cx="79" cy="${ey}" rx="6" ry="5.5" fill="white" stroke="#333" stroke-width="1"/>`;
+            s += `<circle cx="80" cy="${ey}" r="3" fill="#333"/>`;
+            s += `<circle cx="81" cy="${ey-1}" r="1" fill="white"/>`;
+            s += `<ellipse cx="121" cy="${ey}" rx="6" ry="5.5" fill="white" stroke="#333" stroke-width="1"/>`;
+            s += `<circle cx="120" cy="${ey}" r="3" fill="#333"/>`;
+            s += `<circle cx="121" cy="${ey-1}" r="1" fill="white"/>`;
+        }
+        // Nose
+        s += `<path d="M97 103 Q100 110 103 103" stroke="${skD}" stroke-width="1.5" fill="none" stroke-linecap="round"/>`;
+        // Mouth
+        const my = 118;
+        if (ex === 'happy') {
+            s += `<path d="M82 ${my} Q100 ${my+14} 118 ${my}" stroke="#c0392b" stroke-width="2.2" fill="#e74c3c" fill-opacity="0.25" stroke-linecap="round"/>`;
+        } else if (ex === 'surprised') {
+            s += `<ellipse cx="100" cy="${my+3}" rx="6" ry="8" fill="#333" opacity="0.75"/>`;
+        } else if (ex === 'sad') {
+            s += `<path d="M85 ${my+5} Q100 ${my-2} 115 ${my+5}" stroke="#333" stroke-width="2" fill="none" stroke-linecap="round"/>`;
+        } else if (ex === 'angry') {
+            s += `<line x1="84" y1="${my+2}" x2="116" y2="${my+2}" stroke="#333" stroke-width="2.5" stroke-linecap="round"/>`;
+        } else {
+            s += `<path d="M85 ${my} Q100 ${my+6} 115 ${my}" stroke="#333" stroke-width="2" fill="none" stroke-linecap="round"/>`;
+        }
+        // Blush
+        s += `<circle cx="66" cy="108" r="9" fill="#ff9999" opacity="0.12"/>`;
+        s += `<circle cx="134" cy="108" r="9" fill="#ff9999" opacity="0.12"/>`;
+        s += `</svg>`;
+        return s;
+    }
+
+    /* ── Avatar: Minimal ── */
+    function generateMinimalAvatar(f) {
+        const sk = f.skinHex;
+        const hr = f.hairHex;
+        const bg = pickBg(sk + 'mini');
+        const cl = pickCloth(hr + sk + 'mini');
+        const fem = f.gender === 'female' && f.genderProb > 0.55;
+        const ex = f.expression;
+        let s = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">`;
+        s += `<rect width="200" height="200" rx="100" fill="${bg}"/>`;
+        // Body hint
+        s += `<ellipse cx="100" cy="192" rx="40" ry="22" fill="${cl}"/>`;
+        // Neck
+        s += `<rect x="92" y="144" width="16" height="14" rx="4" fill="${sk}"/>`;
+        // Hair back
+        s += `<circle cx="100" cy="88" r="52" fill="${hr}"/>`;
+        if (fem) {
+            s += `<rect x="50" y="88" width="14" height="42" rx="7" fill="${hr}"/>`;
+            s += `<rect x="136" y="88" width="14" height="42" rx="7" fill="${hr}"/>`;
+        }
+        // Face
+        s += `<circle cx="100" cy="100" r="44" fill="${sk}"/>`;
+        // Hair top
+        s += `<path d="M58 95 Q58 52 100 45 Q142 52 142 95 Q138 65 100 58 Q62 65 58 95Z" fill="${hr}"/>`;
+        // Eyes
+        if (ex === 'happy') {
+            s += `<path d="M80 95 Q85 90 90 95" stroke="#333" stroke-width="2" fill="none" stroke-linecap="round"/>`;
+            s += `<path d="M110 95 Q115 90 120 95" stroke="#333" stroke-width="2" fill="none" stroke-linecap="round"/>`;
+        } else {
+            s += `<circle cx="85" cy="95" r="3" fill="#333"/>`;
+            s += `<circle cx="115" cy="95" r="3" fill="#333"/>`;
+        }
+        // Mouth
+        if (ex === 'happy') {
+            s += `<path d="M88 114 Q100 124 112 114" stroke="#333" stroke-width="1.8" fill="none" stroke-linecap="round"/>`;
+        } else if (ex === 'sad') {
+            s += `<path d="M90 118 Q100 112 110 118" stroke="#333" stroke-width="1.8" fill="none" stroke-linecap="round"/>`;
+        } else {
+            s += `<line x1="90" y1="115" x2="110" y2="115" stroke="#333" stroke-width="1.8" stroke-linecap="round"/>`;
+        }
+        s += `</svg>`;
+        return s;
+    }
+
+    /* ── Avatar: Geometric ── */
+    function generateGeoAvatar(f) {
+        const sk = f.skinHex;
+        const hr = f.hairHex, hrD = brighten(hr, 0.65);
+        const bg = pickBg(sk + 'geo');
+        const bgD = brighten(bg, 0.82);
+        const cl = pickCloth(hr + sk + 'geo');
+        const fem = f.gender === 'female' && f.genderProb > 0.55;
+        const ex = f.expression;
+        let s = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">`;
+        s += `<defs><linearGradient id="gbg" x1="0%" y1="0%" x2="100%" y2="100%">`;
+        s += `<stop offset="0%" stop-color="${bg}"/><stop offset="100%" stop-color="${bgD}"/>`;
+        s += `</linearGradient></defs>`;
+        s += `<rect width="200" height="200" rx="16" fill="url(#gbg)"/>`;
+        // Deco
+        s += `<rect x="155" y="15" width="22" height="22" rx="4" fill="${cl}" opacity="0.2" transform="rotate(15 166 26)"/>`;
+        s += `<circle cx="30" cy="175" r="10" fill="${cl}" opacity="0.15"/>`;
+        // Body
+        s += `<rect x="55" y="162" width="90" height="38" rx="18" fill="${cl}"/>`;
+        // Neck
+        s += `<rect x="90" y="148" width="20" height="18" rx="3" fill="${sk}"/>`;
+        // Hair back
+        s += `<rect x="42" y="38" width="116" height="80" rx="28" fill="${hr}"/>`;
+        if (fem) {
+            s += `<rect x="42" y="85" width="16" height="45" rx="8" fill="${hr}"/>`;
+            s += `<rect x="142" y="85" width="16" height="45" rx="8" fill="${hr}"/>`;
+        }
+        // Face
+        s += `<rect x="48" y="48" width="104" height="110" rx="26" fill="${sk}"/>`;
+        // Hair front
+        s += `<rect x="48" y="38" width="104" height="35" rx="20" fill="${hr}"/>`;
+        s += `<rect x="52" y="52" width="40" height="18" rx="8" fill="${hrD}" opacity="0.3"/>`;
+        // Eyes
+        if (ex === 'happy') {
+            s += `<path d="M74 95 Q80 88 86 95" stroke="#333" stroke-width="2.2" fill="none" stroke-linecap="round"/>`;
+            s += `<path d="M114 95 Q120 88 126 95" stroke="#333" stroke-width="2.2" fill="none" stroke-linecap="round"/>`;
+        } else if (ex === 'surprised') {
+            s += `<rect x="72" y="86" width="16" height="16" rx="3" fill="white" stroke="#333" stroke-width="1.2"/>`;
+            s += `<rect x="77" y="91" width="6" height="6" rx="1" fill="#333"/>`;
+            s += `<rect x="112" y="86" width="16" height="16" rx="3" fill="white" stroke="#333" stroke-width="1.2"/>`;
+            s += `<rect x="117" y="91" width="6" height="6" rx="1" fill="#333"/>`;
+        } else {
+            s += `<rect x="72" y="87" width="16" height="14" rx="4" fill="white" stroke="#333" stroke-width="1"/>`;
+            s += `<circle cx="80" cy="94" r="3.5" fill="#333"/>`;
+            s += `<rect x="112" y="87" width="16" height="14" rx="4" fill="white" stroke="#333" stroke-width="1"/>`;
+            s += `<circle cx="120" cy="94" r="3.5" fill="#333"/>`;
+        }
+        // Nose
+        s += `<polygon points="97,108 100,116 103,108" fill="${brighten(sk, 0.8)}" opacity="0.5"/>`;
+        // Mouth
+        if (ex === 'happy') {
+            s += `<path d="M85 126 Q100 138 115 126" stroke="#333" stroke-width="2" fill="none" stroke-linecap="round"/>`;
+        } else if (ex === 'sad') {
+            s += `<path d="M88 132 Q100 124 112 132" stroke="#333" stroke-width="2" fill="none" stroke-linecap="round"/>`;
+        } else {
+            s += `<rect x="88" y="128" width="24" height="4" rx="2" fill="#333" opacity="0.55"/>`;
+        }
+        s += `</svg>`;
+        return s;
+    }
+
+    /* ── Display Results ── */
+    function showResults(photoUrl, features, avatars) {
+        const preview = document.getElementById('photo-preview');
+        preview.innerHTML = `<img src="${photoUrl}" alt="Dein Foto"/>`;
+
+        const expressionMap = {
+            neutral: 'Neutral', happy: 'Gl\u00fccklich', sad: 'Traurig',
+            angry: 'W\u00fctend', fearful: '\u00c4ngstlich', disgusted: 'Angewidert', surprised: '\u00dcberrascht'
+        };
+
+        const fl = document.getElementById('features-list');
+        fl.innerHTML = `
+            <div class="feature-item"><span class="label">Alter</span><span class="value">~${features.age} Jahre</span></div>
+            <div class="feature-item"><span class="label">Geschlecht</span><span class="value">${features.gender === 'male' ? 'M\u00e4nnlich' : 'Weiblich'} (${Math.round(features.genderProb * 100)}%)</span></div>
+            <div class="feature-item"><span class="label">Ausdruck</span><span class="value">${expressionMap[features.expression] || features.expression}</span></div>
+            <div class="feature-item"><span class="label">Hautton</span><span class="value"><span class="color-dot" style="background:${features.skinHex}"></span>${features.skinHex}</span></div>
+            <div class="feature-item"><span class="label">Haarfarbe</span><span class="value"><span class="color-dot" style="background:${features.hairHex}"></span>${features.hairHex}</span></div>
+        `;
+
+        const grid = document.getElementById('avatar-grid');
+        grid.innerHTML = '';
+        avatars.forEach((a, i) => {
+            const card = document.createElement('div');
+            card.className = 'avatar-card';
+            card.innerHTML = `${a.svg}<div class="style-name">${a.name}</div><button class="dl-btn" onclick="event.stopPropagation(); downloadSvg(this, '${a.name}')">Herunterladen</button>`;
+            card.addEventListener('click', () => {
+                grid.querySelectorAll('.avatar-card').forEach(c => c.classList.remove('selected'));
+                card.classList.add('selected');
+            });
+            grid.appendChild(card);
+        });
+
+        document.getElementById('results').style.display = 'block';
+    }
+
+    function downloadSvg(btn, name) {
+        const svg = btn.closest('.avatar-card').querySelector('svg').outerHTML;
+        const blob = new Blob([svg], { type: 'image/svg+xml' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `avatar-${name.toLowerCase()}.svg`;
+        a.click();
+        URL.revokeObjectURL(url);
+    }
+
+    /* ── UI Helpers ── */
+    function setStatus(text, loading, cls) {
+        const el = document.getElementById('status');
+        el.className = cls || '';
+        el.innerHTML = (loading ? '<div class="spinner"></div>' : '') + `<span>${text}</span>`;
+    }
+
+    /* ── Events ── */
+    document.getElementById('capture-btn').addEventListener('click', capture);
+    document.getElementById('retry-btn').addEventListener('click', retry);
+    </script>
+</body>
+</html>
