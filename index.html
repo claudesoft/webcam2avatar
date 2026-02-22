@@ -293,25 +293,28 @@
             document.getElementById('retry-btn').style.display = 'inline-block';
 
             setStatus('Foto aufgenommen! Starte Gesichtsanalyse...', true);
-            logToScreen('Analysiere Gesicht...', 'info');
+            logToScreen('Analysiere Gesicht (TinyFaceDetector)...', 'info');
 
             const detection = await faceapi
-                .detectSingleFace(canvas, new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.35 })) // Reduced inputSize for mobile
+                .detectSingleFace(canvas, new faceapi.TinyFaceDetectorOptions({ inputSize: 160, scoreThreshold: 0.3 })) // Further reduced for iPhone speed
                 .withFaceLandmarks()
                 .withFaceExpressions()
                 .withAgeAndGender();
 
             if (!detection) {
                 setStatus('Kein Gesicht erkannt. Bitte versuche es erneut.', false, 'error');
-                logToScreen('Kein Gesicht erkannt.', 'error');
+                logToScreen('Kein Gesicht erkannt. Licht okay?', 'error');
                 return;
             }
 
-            setStatus('Gesicht erkannt! Analysiere Merkmale (Hautton, Haare, Brille, Schnurrbart)...', true);
-            logToScreen('Extrahiere Merkmale...', 'info');
-            const features = extractFeatures(detection, ctx);
+            setStatus('Gesicht erkannt! Analysiere Details...', true);
+            logToScreen('Gesicht gefunden. Extrahiere Merkmale...', 'info');
             
-            logToScreen(`Extraktion fertig. Expression: ${features.refinedExpression}, Ohrringe: ${features.hasEarrings ? 'Ja' : 'Nein'}`, 'info');
+            // Optimization: Get ALL image data at once to avoid repeated slow GPU-CPU syncs
+            const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            const features = extractFeatures(detection, imgData);
+            
+            logToScreen(`Extraktion fertig. Expression: ${features.refinedExpression}`, 'info');
 
             const avatars = [
                 { name: 'Cartoon', svg: generateCartoonAvatar(features) },
@@ -320,15 +323,15 @@
                 { name: 'Geo', svg: generateGeoAvatar(features) },
             ];
             
-            setStatus('Generiere Avatar-Vorschl\u00e4ge...', true);
-            await new Promise(r => setTimeout(r, 100));
-            showResults(canvas.toDataURL('image/jpeg', 0.85), features, avatars);
-            setStatus('Fertig! W\u00e4hle deinen Lieblings-Avatar.', false, 'success');
-            logToScreen('Avatar generiert!', 'success');
+            setStatus('Generiere Avatare...', true);
+            await new Promise(r => setTimeout(r, 50));
+            showResults(canvas.toDataURL('image/jpeg', 0.8), features, avatars);
+            setStatus('Fertig!', false, 'success');
+            logToScreen('Alles erledigt!', 'success');
         } catch (err) {
             console.error(err);
-            setStatus('Analyse-Fehler: ' + err.message, false, 'error');
-            logToScreen('FEHLER bei capture(): ' + err.message, 'error');
+            setStatus('Fehler: ' + err.message, false, 'error');
+            logToScreen('FATAL ERR: ' + err.message, 'error');
         }
     }
 
@@ -344,16 +347,19 @@
         document.getElementById('capture-btn').disabled = false;
     }
 
-    /* ── Pixel Sampling Helpers ── */
-    function sampleGrid(ctx, cx, cy, radius) {
+    /* ── Optimized Pixel Sampling Helpers ── */
+    function getPixel(imgData, x, y) {
+        const ix = Math.max(0, Math.min(Math.round(x), imgData.width - 1));
+        const iy = Math.max(0, Math.min(Math.round(y), imgData.height - 1));
+        const i = (iy * imgData.width + ix) * 4;
+        return { r: imgData.data[i], g: imgData.data[i+1], b: imgData.data[i+2] };
+    }
+
+    function sampleGrid(imgData, cx, cy, radius) {
         const colors = [];
-        const w = ctx.canvas.width, h = ctx.canvas.height;
         for (let dy = -radius; dy <= radius; dy++) {
             for (let dx = -radius; dx <= radius; dx++) {
-                const x = Math.max(0, Math.min(Math.round(cx + dx), w - 1));
-                const y = Math.max(0, Math.min(Math.round(cy + dy), h - 1));
-                const d = ctx.getImageData(x, y, 1, 1).data;
-                colors.push({ r: d[0], g: d[1], b: d[2] });
+                colors.push(getPixel(imgData, cx + dx, cy + dy));
             }
         }
         return colors;
@@ -363,43 +369,35 @@
         if (!colors.length) return { r: 180, g: 150, b: 130 };
         let r = 0, g = 0, b = 0;
         for (const c of colors) { r += c.r; g += c.g; b += c.b; }
-        const n = colors.length;
-        return { r: Math.round(r / n), g: Math.round(g / n), b: Math.round(b / n) };
+        return { r: Math.round(r / colors.length), g: Math.round(g / colors.length), b: Math.round(b / colors.length) };
     }
 
     function medianColor(colors) {
         if (!colors.length) return { r: 180, g: 150, b: 130 };
-        colors.sort((a, b) => (a.r + a.g + a.b) - (b.r + b.g + b.b));
-        return colors[Math.floor(colors.length / 2)];
+        const sorted = [...colors].sort((a, b) => (a.r + a.g + a.b) - (b.r + b.g + b.b));
+        return sorted[Math.floor(sorted.length / 2)];
     }
 
     function brightnessOf(c) { return (c.r + c.g + c.b) / 3; }
 
-    function avgBrightnessOfPts(ctx, pts) {
+    function avgBrightnessOfPts(imgData, pts) {
         if (!pts.length) return 128;
         let total = 0;
-        const w = ctx.canvas.width, h = ctx.canvas.height;
         for (const p of pts) {
-            const x = Math.max(0, Math.min(Math.round(p.x), w - 1));
-            const y = Math.max(0, Math.min(Math.round(p.y), h - 1));
-            const d = ctx.getImageData(x, y, 1, 1).data;
-            total += (d[0] + d[1] + d[2]) / 3;
+            const c = getPixel(imgData, p.x, p.y);
+            total += (c.r + c.g + c.b) / 3;
         }
         return total / pts.length;
     }
 
-    function avgColorOfPts(ctx, pts) {
+    function avgColorOfPts(imgData, pts) {
         if (!pts.length) return { r: 60, g: 60, b: 60 };
         let r = 0, g = 0, b = 0;
-        const w = ctx.canvas.width, h = ctx.canvas.height;
         for (const p of pts) {
-            const x = Math.max(0, Math.min(Math.round(p.x), w - 1));
-            const y = Math.max(0, Math.min(Math.round(p.y), h - 1));
-            const d = ctx.getImageData(x, y, 1, 1).data;
-            r += d[0]; g += d[1]; b += d[2];
+            const c = getPixel(imgData, p.x, p.y);
+            r += c.r; g += c.g; b += c.b;
         }
-        const n = pts.length;
-        return { r: Math.round(r / n), g: Math.round(g / n), b: Math.round(b / n) };
+        return { r: Math.round(r / pts.length), g: Math.round(g / pts.length), b: Math.round(b / pts.length) };
     }
 
     function clampBrightness(c, lo, hi) {
@@ -428,7 +426,7 @@
     function pickCloth(seed) { return CLOTH_COLORS[Math.abs(hashStr(seed)) % CLOTH_COLORS.length]; }
 
     /* ── Feature Extraction (refined) ── */
-    function extractFeatures(det, ctx) {
+    function extractFeatures(det, imgData) {
         try {
             const lm = det.landmarks;
             const age = Math.round(det.age);
@@ -448,19 +446,19 @@
             const leftEye = lm.getLeftEye();
             const rightEye = lm.getRightEye();
 
-            // ── Skin color: sample from well-lit face areas ──
+            // ── Skin color ──
             const skinSamples = [];
             const foreheadX = (leftBrow[2].x + rightBrow[2].x) / 2;
             const foreheadY = (leftBrow[2].y + rightBrow[2].y) / 2;
-            skinSamples.push(...sampleGrid(ctx, foreheadX, foreheadY, 3));
-            skinSamples.push(...sampleGrid(ctx, nose[0].x - 8, nose[0].y, 2));
-            skinSamples.push(...sampleGrid(ctx, nose[0].x + 8, nose[0].y, 2));
+            skinSamples.push(...sampleGrid(imgData, foreheadX, foreheadY, 3));
+            skinSamples.push(...sampleGrid(imgData, nose[0].x - 8, nose[0].y, 2));
+            skinSamples.push(...sampleGrid(imgData, nose[0].x + 8, nose[0].y, 2));
 
             for (const eyeSet of [leftEye, rightEye]) {
                 const cx = (eyeSet[0].x + eyeSet[3].x) / 2;
                 const cheekX = cx + (nose[0].x - cx) * 0.4;
                 const cheekY = eyeSet[4].y + 10;
-                skinSamples.push(...sampleGrid(ctx, cheekX, cheekY, 3));
+                skinSamples.push(...sampleGrid(imgData, cheekX, cheekY, 3));
             }
 
             let skinColor = medianColor(skinSamples);
@@ -478,7 +476,7 @@
                 const off = hairOffset * offsetMul;
                 for (const p of brows) {
                     const y = p.y - off;
-                    if (y > 2) allHairSamples.push(...sampleGrid(ctx, p.x, y, 2));
+                    if (y > 2) allHairSamples.push(...sampleGrid(imgData, p.x, y, 2));
                 }
             }
 
@@ -506,9 +504,9 @@
             const noseBottom = nose[6];
             const mouthTop = mouth[3];
             for (let t = 0.2; t <= 0.8; t += 0.3) {
-                mustacheZone.push(...sampleGrid(ctx, noseBottom.x, noseBottom.y + (mouthTop.y - noseBottom.y) * t, 2));
+                mustacheZone.push(...sampleGrid(imgData, noseBottom.x, noseBottom.y + (mouthTop.y - noseBottom.y) * t, 2));
             }
-            const mustacheBr = avgBrightnessOfPts(ctx, mustacheZone);
+            const mustacheBr = avgBrightnessOfPts(imgData, mustacheZone);
             const hasMustache = (mustacheBr < skinBr * 0.78);
 
             // ── Teeth Detection ──
@@ -516,8 +514,8 @@
             if (expression === 'happy') {
                 const innerMouthPts = [];
                 const mCenter = { x: (mouth[12].x + mouth[16].x) / 2, y: (mouth[12].y + mouth[16].y) / 2 };
-                innerMouthPts.push(...sampleGrid(ctx, mCenter.x, mCenter.y, 2));
-                showsTeeth = avgBrightnessOfPts(ctx, innerMouthPts) > skinBr * 0.8 || avgBrightnessOfPts(ctx, innerMouthPts) > 160;
+                innerMouthPts.push(...sampleGrid(imgData, mCenter.x, mCenter.y, 2));
+                showsTeeth = avgBrightnessOfPts(imgData, innerMouthPts) > skinBr * 0.8 || avgBrightnessOfPts(imgData, innerMouthPts) > 160;
             }
 
             // ── Nose Shape ──
@@ -527,13 +525,11 @@
 
             // ── Earring Detection ──
             let hasEarrings = false;
-            // Sampling around points 0 and 16 of jaw (likely earlobe area)
             const lobePoints = [jaw[0], jaw[1], jaw[15], jaw[16]];
             for (const p of lobePoints) {
                 const side = p.x < (jaw[8].x) ? -1 : 1;
-                const earringZone = sampleGrid(ctx, p.x + (side * 6), p.y + 2, 4);
-                const avgE = avgBrightnessOfPts(ctx, earringZone);
-                // Contrast check: Earrings are often very shiny/bright or much darker than skin
+                const earringZone = sampleGrid(imgData, p.x + (side * 6), p.y + 2, 4);
+                const avgE = avgBrightnessOfPts(imgData, earringZone);
                 if (Math.abs(avgE - skinBr) > 45 || avgE > 220) {
                     hasEarrings = true;
                     break;
@@ -541,7 +537,7 @@
             }
 
             // ── Glasses detection ──
-            const glasses = detectGlasses(ctx, lm, skinBr);
+            const glasses = detectGlasses(imgData, lm, skinBr);
 
             return {
                 age, gender, genderProb, expression, refinedExpression,
@@ -557,7 +553,7 @@
     }
 
     /* ── Glasses Detection ── */
-    function detectGlasses(ctx, landmarks, skinBr) {
+    function detectGlasses(imgData, landmarks, skinBr) {
         const le = landmarks.getLeftEye(), re = landmarks.getRightEye();
         const lb = landmarks.getLeftEyeBrow(), rb = landmarks.getRightEyeBrow();
         function box(pts) {
@@ -575,8 +571,8 @@
         const lInner = le[3], rInner = re[0];
         for (let t = 0.1; t <= 0.9; t += 0.1) bridgePts.push({ x: lInner.x + (rInner.x - lInner.x) * t, y: lInner.y + (rInner.y - lInner.y) * t - 2 });
         
-        const topRatio = avgBrightnessOfPts(ctx, topPts) / Math.max(skinBr, 1);
-        const bridgeRatio = avgBrightnessOfPts(ctx, bridgePts) / Math.max(skinBr, 1);
+        const topRatio = avgBrightnessOfPts(imgData, topPts) / Math.max(skinBr, 1);
+        const bridgeRatio = avgBrightnessOfPts(imgData, bridgePts) / Math.max(skinBr, 1);
         const hasGlasses = (topRatio < 0.72 || bridgeRatio < 0.72);
 
         if (!hasGlasses) return { hasGlasses: false, shape: null, colorHex: null };
@@ -584,7 +580,7 @@
         const glassW = (lBox.w + rBox.w) / 2 + 10, glassH = (lBox.h + rBox.h) / 2 + 10;
         const ar = glassW / Math.max(glassH, 1);
         const shape = ar > 1.6 ? 'eckig' : ar < 1.2 ? 'rund' : 'oval';
-        const frameColor = avgColorOfPts(ctx, bridgePts);
+        const frameColor = avgColorOfPts(imgData, bridgePts);
         return { hasGlasses: true, shape, color: frameColor, colorHex: rgbHex(frameColor) };
     }
 
