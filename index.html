@@ -156,6 +156,25 @@
             transform: scaleX(-1);
             border: 2px solid #2d2d4a;
         }
+
+        /* Debug Logger Styles */
+        #debug-log {
+            width: 100%;
+            max-width: 720px;
+            background: #101020;
+            padding: 10px;
+            border-radius: 8px;
+            margin-top: 2rem;
+            max-height: 150px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 0.75rem;
+            border: 1px solid #333;
+        }
+        .log-entry { margin-bottom: 4px; padding: 2px 4px; border-radius: 4px; border-left: 3px solid #6c5ce7; }
+        .log-entry.error { border-left-color: #e74c3c; background: #2a0a0a; }
+        .log-entry.info { border-left-color: #2ecc71; }
+
         @media (max-width: 600px) {
             .avatar-grid { grid-template-columns: 1fr 1fr; }
             .features-grid { grid-template-columns: 1fr 1fr; }
@@ -191,7 +210,30 @@
         </div>
     </div>
 
+    <div id="debug-log"></div>
+
     <script>
+    // --- Mobile Debug Logger ---
+    const debugLog = document.getElementById('debug-log');
+    function logToScreen(msg, type = 'info') {
+        const div = document.createElement('div');
+        div.className = 'log-entry ' + type;
+        div.innerText = `[${new Date().toLocaleTimeString()}] ${msg}`;
+        debugLog.prepend(div);
+        if (debugLog.childNodes.length > 20) debugLog.removeChild(debugLog.lastChild);
+    }
+    window.onerror = (msg, url, line) => logToScreen(`ERR: ${msg} (${line})`, 'error');
+    const _oldError = console.error;
+    console.error = function(...args) {
+        logToScreen(args.join(' '), 'error');
+        _oldError.apply(console, args);
+    };
+    const _oldLog = console.log;
+    console.log = function(...args) {
+        logToScreen(args.join(' '), 'info');
+        _oldLog.apply(console, args);
+    };
+
     document.addEventListener('DOMContentLoaded', () => { init(); });
 
     const MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model';
@@ -237,44 +279,57 @@
 
     /* ── Capture & Analyze ── */
     async function capture() {
-        const video = document.getElementById('video');
-        const canvas = document.getElementById('snapshot-canvas');
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(video, 0, 0);
+        try {
+            const video = document.getElementById('video');
+            const canvas = document.getElementById('snapshot-canvas');
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(video, 0, 0);
 
-        stopCamera();
-        video.style.display = 'none';
-        document.getElementById('capture-btn').style.display = 'none';
-        document.getElementById('retry-btn').style.display = 'inline-block';
+            stopCamera();
+            video.style.display = 'none';
+            document.getElementById('capture-btn').style.display = 'none';
+            document.getElementById('retry-btn').style.display = 'inline-block';
 
-        setStatus('Foto aufgenommen! Starte Gesichtsanalyse...', true);
+            setStatus('Foto aufgenommen! Starte Gesichtsanalyse...', true);
+            logToScreen('Analysiere Gesicht...', 'info');
 
-        const detection = await faceapi
-            .detectSingleFace(canvas, new faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.4 }))
-            .withFaceLandmarks()
-            .withFaceExpressions()
-            .withAgeAndGender();
+            const detection = await faceapi
+                .detectSingleFace(canvas, new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.35 })) // Reduced inputSize for mobile
+                .withFaceLandmarks()
+                .withFaceExpressions()
+                .withAgeAndGender();
 
-        if (!detection) {
-            setStatus('Kein Gesicht erkannt. Bitte versuche es erneut.', false, 'error');
-            return;
+            if (!detection) {
+                setStatus('Kein Gesicht erkannt. Bitte versuche es erneut.', false, 'error');
+                logToScreen('Kein Gesicht erkannt.', 'error');
+                return;
+            }
+
+            setStatus('Gesicht erkannt! Analysiere Merkmale (Hautton, Haare, Brille, Schnurrbart)...', true);
+            logToScreen('Extrahiere Merkmale...', 'info');
+            const features = extractFeatures(detection, ctx);
+            
+            logToScreen(`Extraktion fertig. Expression: ${features.refinedExpression}, Ohrringe: ${features.hasEarrings ? 'Ja' : 'Nein'}`, 'info');
+
+            const avatars = [
+                { name: 'Cartoon', svg: generateCartoonAvatar(features) },
+                { name: 'Artistic', svg: generateArtisticAvatar(features) },
+                { name: 'Minimal', svg: generateMinimalAvatar(features) },
+                { name: 'Geo', svg: generateGeoAvatar(features) },
+            ];
+            
+            setStatus('Generiere Avatar-Vorschl\u00e4ge...', true);
+            await new Promise(r => setTimeout(r, 100));
+            showResults(canvas.toDataURL('image/jpeg', 0.85), features, avatars);
+            setStatus('Fertig! W\u00e4hle deinen Lieblings-Avatar.', false, 'success');
+            logToScreen('Avatar generiert!', 'success');
+        } catch (err) {
+            console.error(err);
+            setStatus('Analyse-Fehler: ' + err.message, false, 'error');
+            logToScreen('FEHLER bei capture(): ' + err.message, 'error');
         }
-
-        setStatus('Gesicht erkannt! Analysiere Merkmale (Hautton, Haare, Brille, Schnurrbart)...', true);
-        const features = extractFeatures(detection, ctx);
-        const avatars = [
-            { name: 'Cartoon', svg: generateCartoonAvatar(features) },
-            { name: 'Artistic', svg: generateArtisticAvatar(features) },
-            { name: 'Minimal', svg: generateMinimalAvatar(features) },
-            { name: 'Geo', svg: generateGeoAvatar(features) },
-        ];
-        setStatus('Generiere Avatar-Vorschl\u00e4ge...', true);
-        // Short delay so user sees the status update
-        await new Promise(r => setTimeout(r, 100));
-        showResults(canvas.toDataURL('image/jpeg', 0.85), features, avatars);
-        setStatus('Fertig! W\u00e4hle deinen Lieblings-Avatar.', false, 'success');
     }
 
     async function retry() {
@@ -374,117 +429,131 @@
 
     /* ── Feature Extraction (refined) ── */
     function extractFeatures(det, ctx) {
-        const lm = det.landmarks;
-        const age = Math.round(det.age);
-        const gender = det.gender;
-        const genderProb = det.genderProbability;
+        try {
+            const lm = det.landmarks;
+            const age = Math.round(det.age);
+            const gender = det.gender;
+            const genderProb = det.genderProbability;
 
-        const exprs = det.expressions;
-        const sortedExprs = Object.entries(exprs).sort((a, b) => b[1] - a[1]);
-        const expression = sortedExprs[0][0];
-        const expressionScore = sortedExprs[0][1];
+            const exprs = det.expressions;
+            const sortedExprs = Object.entries(exprs).sort((a, b) => b[1] - a[1]);
+            const expression = sortedExprs[0][0];
+            const expressionScore = sortedExprs[0][1];
 
-        const jaw = lm.getJawOutline();
-        const nose = lm.getNose();
-        const mouth = lm.getMouth();
-        const leftBrow = lm.getLeftEyeBrow();
-        const rightBrow = lm.getRightEyeBrow();
-        const leftEye = lm.getLeftEye();
-        const rightEye = lm.getRightEye();
+            const jaw = lm.getJawOutline();
+            const nose = lm.getNose();
+            const mouth = lm.getMouth();
+            const leftBrow = lm.getLeftEyeBrow();
+            const rightBrow = lm.getRightEyeBrow();
+            const leftEye = lm.getLeftEye();
+            const rightEye = lm.getRightEye();
 
-        // ── Skin color: sample from well-lit face areas ──
-        const skinSamples = [];
-        const foreheadX = (leftBrow[2].x + rightBrow[2].x) / 2;
-        const foreheadY = (leftBrow[2].y + rightBrow[2].y) / 2;
-        skinSamples.push(...sampleGrid(ctx, foreheadX, foreheadY, 3));
-        skinSamples.push(...sampleGrid(ctx, nose[0].x - 8, nose[0].y, 2));
-        skinSamples.push(...sampleGrid(ctx, nose[0].x + 8, nose[0].y, 2));
+            // ── Skin color: sample from well-lit face areas ──
+            const skinSamples = [];
+            const foreheadX = (leftBrow[2].x + rightBrow[2].x) / 2;
+            const foreheadY = (leftBrow[2].y + rightBrow[2].y) / 2;
+            skinSamples.push(...sampleGrid(ctx, foreheadX, foreheadY, 3));
+            skinSamples.push(...sampleGrid(ctx, nose[0].x - 8, nose[0].y, 2));
+            skinSamples.push(...sampleGrid(ctx, nose[0].x + 8, nose[0].y, 2));
 
-        for (const eyeSet of [leftEye, rightEye]) {
-            const cx = (eyeSet[0].x + eyeSet[3].x) / 2;
-            const cheekX = cx + (nose[0].x - cx) * 0.4;
-            const cheekY = eyeSet[4].y + 10;
-            skinSamples.push(...sampleGrid(ctx, cheekX, cheekY, 3));
-        }
-
-        let skinColor = medianColor(skinSamples);
-        skinColor = mapC(skinColor, 1.15);
-        skinColor = clampBrightness(skinColor, 95, 245);
-        const skinBr = brightnessOf(skinColor);
-
-        // ── Hair color ──
-        const allHairSamples = [];
-        const brows = [...leftBrow, ...rightBrow];
-        const faceH = jaw[8].y - Math.min(...brows.map(p => p.y));
-        const hairOffset = Math.max(35, faceH * 0.65);
-
-        for (const offsetMul of [0.8, 1.0, 1.2]) {
-            const off = hairOffset * offsetMul;
-            for (const p of brows) {
-                const y = p.y - off;
-                if (y > 2) allHairSamples.push(...sampleGrid(ctx, p.x, y, 2));
+            for (const eyeSet of [leftEye, rightEye]) {
+                const cx = (eyeSet[0].x + eyeSet[3].x) / 2;
+                const cheekX = cx + (nose[0].x - cx) * 0.4;
+                const cheekY = eyeSet[4].y + 10;
+                skinSamples.push(...sampleGrid(ctx, cheekX, cheekY, 3));
             }
+
+            let skinColor = medianColor(skinSamples);
+            skinColor = mapC(skinColor, 1.15);
+            skinColor = clampBrightness(skinColor, 95, 245);
+            const skinBr = brightnessOf(skinColor);
+
+            // ── Hair color ──
+            const allHairSamples = [];
+            const brows = [...leftBrow, ...rightBrow];
+            const faceH = jaw[8].y - Math.min(...brows.map(p => p.y));
+            const hairOffset = Math.max(35, faceH * 0.65);
+
+            for (const offsetMul of [0.8, 1.0, 1.2]) {
+                const off = hairOffset * offsetMul;
+                for (const p of brows) {
+                    const y = p.y - off;
+                    if (y > 2) allHairSamples.push(...sampleGrid(ctx, p.x, y, 2));
+                }
+            }
+
+            let hairColor = allHairSamples.length > 0 ? medianColor(allHairSamples) : { r: 60, g: 40, b: 30 };
+            if (Math.abs(hairColor.r - skinColor.r) + Math.abs(hairColor.g - skinColor.g) + Math.abs(hairColor.b - skinColor.b) < 50) {
+                hairColor = mapC(hairColor, 0.55);
+            }
+            hairColor = clampBrightness(hairColor, 15, 210);
+
+            // ── Refined Expression ──
+            let refinedExpression = 'Normal';
+            if (expression === 'happy') {
+                refinedExpression = expressionScore > 0.85 ? '\u00dcbergl\u00fccklich' : 'Normal lachend';
+            } else if (expression === 'sad') {
+                refinedExpression = expressionScore > 0.7 ? 'Voll traurig' : 'Traurig';
+            } else if (expression === 'neutral') {
+                refinedExpression = 'Neutral';
+            } else {
+                const m = { angry: 'W\u00fctend', fearful: '\u00c4ngstlich', disgusted: 'Angewidert', surprised: '\u00dcberrascht' };
+                refinedExpression = m[expression] || expression;
+            }
+
+            // ── Mustache Detection ──
+            const mustacheZone = [];
+            const noseBottom = nose[6];
+            const mouthTop = mouth[3];
+            for (let t = 0.2; t <= 0.8; t += 0.3) {
+                mustacheZone.push(...sampleGrid(ctx, noseBottom.x, noseBottom.y + (mouthTop.y - noseBottom.y) * t, 2));
+            }
+            const mustacheBr = avgBrightnessOfPts(ctx, mustacheZone);
+            const hasMustache = (mustacheBr < skinBr * 0.78);
+
+            // ── Teeth Detection ──
+            let showsTeeth = false;
+            if (expression === 'happy') {
+                const innerMouthPts = [];
+                const mCenter = { x: (mouth[12].x + mouth[16].x) / 2, y: (mouth[12].y + mouth[16].y) / 2 };
+                innerMouthPts.push(...sampleGrid(ctx, mCenter.x, mCenter.y, 2));
+                showsTeeth = avgBrightnessOfPts(ctx, innerMouthPts) > skinBr * 0.8 || avgBrightnessOfPts(ctx, innerMouthPts) > 160;
+            }
+
+            // ── Nose Shape ──
+            const noseWidth = Math.abs(nose[4].x - nose[0].x);
+            const noseHeight = Math.abs(nose[3].y - nose[0].y);
+            const noseShape = (noseWidth / (noseHeight || 1)) > 1.3 ? 'breit' : 'schmal/kurz';
+
+            // ── Earring Detection ──
+            let hasEarrings = false;
+            // Sampling around points 0 and 16 of jaw (likely earlobe area)
+            const lobePoints = [jaw[0], jaw[1], jaw[15], jaw[16]];
+            for (const p of lobePoints) {
+                const side = p.x < (jaw[8].x) ? -1 : 1;
+                const earringZone = sampleGrid(ctx, p.x + (side * 6), p.y + 2, 4);
+                const avgE = avgBrightnessOfPts(ctx, earringZone);
+                // Contrast check: Earrings are often very shiny/bright or much darker than skin
+                if (Math.abs(avgE - skinBr) > 45 || avgE > 220) {
+                    hasEarrings = true;
+                    break;
+                }
+            }
+
+            // ── Glasses detection ──
+            const glasses = detectGlasses(ctx, lm, skinBr);
+
+            return {
+                age, gender, genderProb, expression, refinedExpression,
+                skinColor, hairColor,
+                skinHex: rgbHex(skinColor),
+                hairHex: rgbHex(hairColor),
+                glasses, hasMustache, showsTeeth, noseShape, hasEarrings
+            };
+        } catch (e) {
+            logToScreen('ERR in extractFeatures: ' + e.message, 'error');
+            throw e;
         }
-
-        let hairColor = allHairSamples.length > 0 ? medianColor(allHairSamples) : { r: 60, g: 40, b: 30 };
-        if (Math.abs(hairColor.r - skinColor.r) + Math.abs(hairColor.g - skinColor.g) + Math.abs(hairColor.b - skinColor.b) < 50) {
-            hairColor = mapC(hairColor, 0.55);
-        }
-        hairColor = clampBrightness(hairColor, 15, 210);
-
-        // ── Refined Expression ──
-        let refinedExpression = 'Normal';
-        if (expression === 'happy') {
-            refinedExpression = expressionScore > 0.85 ? '\u00dcbergl\u00fccklich' : 'Normal lachend';
-        } else if (expression === 'sad') {
-            refinedExpression = expressionScore > 0.7 ? 'Voll traurig' : 'Traurig';
-        } else if (expression === 'neutral') {
-            refinedExpression = 'Neutral';
-        } else {
-            const m = { angry: 'W\u00fctend', fearful: '\u00c4ngstlich', disgusted: 'Angewidert', surprised: '\u00dcberrascht' };
-            refinedExpression = m[expression] || expression;
-        }
-
-        // ── Mustache Detection ──
-        const mustacheZone = [];
-        const noseBottom = nose[6];
-        const mouthTop = mouth[3];
-        for (let t = 0.2; t <= 0.8; t += 0.3) {
-            mustacheZone.push(...sampleGrid(ctx, noseBottom.x, noseBottom.y + (mouthTop.y - noseBottom.y) * t, 2));
-        }
-        const mustacheBr = avgBrightnessOfPts(ctx, mustacheZone);
-        const hasMustache = (mustacheBr < skinBr * 0.78);
-
-        // ── Teeth Detection ──
-        let showsTeeth = false;
-        if (expression === 'happy') {
-            const innerMouthPts = [];
-            const mCenter = { x: (mouth[12].x + mouth[16].x) / 2, y: (mouth[12].y + mouth[16].y) / 2 };
-            innerMouthPts.push(...sampleGrid(ctx, mCenter.x, mCenter.y, 2));
-            showsTeeth = avgBrightnessOfPts(ctx, innerMouthPts) > skinBr * 0.8 || avgBrightnessOfPts(ctx, innerMouthPts) > 160;
-        }
-
-        // ── Nose Shape ──
-        const noseWidth = Math.abs(nose[4].x - nose[0].x);
-        const noseHeight = Math.abs(nose[3].y - nose[0].y);
-        const noseShape = (noseWidth / (noseHeight || 1)) > 1.3 ? 'breit' : 'schmal/kurz';
-
-        // ── Earring Detection ──
-        const earringPts = [];
-        earringPts.push(...sampleGrid(ctx, jaw[0].x - 5, jaw[0].y + 5, 2));
-        earringPts.push(...sampleGrid(ctx, jaw[16].x + 5, jaw[16].y + 5, 2));
-        const hasEarrings = Math.abs(avgBrightnessOfPts(ctx, earringPts) - skinBr) > 40;
-
-        // ── Glasses detection ──
-        const glasses = detectGlasses(ctx, lm, skinBr);
-
-        return {
-            age, gender, genderProb, expression, refinedExpression,
-            skinColor, hairColor,
-            skinHex: rgbHex(skinColor),
-            hairHex: rgbHex(hairColor),
-            glasses, hasMustache, showsTeeth, noseShape, hasEarrings
-        };
     }
 
     /* ── Glasses Detection ── */
