@@ -186,6 +186,23 @@
     <h1>Webcam2Avatar</h1>
     <p class="subtitle">Foto machen &rarr; Gesicht analysieren &rarr; Avatar generieren</p>
 
+    <!-- Hidden SVG Filters for the "Comic" style -->
+    <svg style="display:none">
+        <defs>
+            <filter id="comic-filter">
+                <feColorMatrix type="saturate" values="1.5"/>
+                <feComponentTransfer>
+                    <feFuncR type="discrete" tableValues="0 0.2 0.4 0.6 0.8 1"/>
+                    <feFuncG type="discrete" tableValues="0 0.2 0.4 0.6 0.8 1"/>
+                    <feFuncB type="discrete" tableValues="0 0.2 0.4 0.6 0.8 1"/>
+                </feComponentTransfer>
+                <feMorphology operator="dilate" radius="1" result="dilated"/>
+                <feEdgeDetection input="dilated" result="edges"/>
+                <feComposite in="SourceGraphic" in2="edges" operator="out"/>
+            </filter>
+        </defs>
+    </svg>
+
     <div id="camera-section">
         <video id="video" autoplay playsinline muted></video>
     </div>
@@ -313,19 +330,22 @@
             // Optimization: Get ALL image data at once to avoid repeated slow GPU-CPU syncs
             const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
             const features = extractFeatures(detection, imgData);
+            features.landmarks = detection.landmarks; // Pass landmarks for geometric avatars
             
             logToScreen(`Extraktion fertig. Expression: ${features.refinedExpression}`, 'info');
 
+            const photoData = canvas.toDataURL('image/jpeg', 0.8);
             const avatars = [
+                { name: 'DNA Vector', svg: generateDnaAvatar(features) },
+                { name: 'Comic Photo', svg: generateComicAvatar(photoData) },
                 { name: 'Cartoon', svg: generateCartoonAvatar(features) },
                 { name: 'Artistic', svg: generateArtisticAvatar(features) },
                 { name: 'Minimal', svg: generateMinimalAvatar(features) },
-                { name: 'Geo', svg: generateGeoAvatar(features) },
             ];
             
             setStatus('Generiere Avatare...', true);
             await new Promise(r => setTimeout(r, 50));
-            showResults(canvas.toDataURL('image/jpeg', 0.8), features, avatars);
+            showResults(photoData, features, avatars);
             setStatus('Fertig!', false, 'success');
             logToScreen('Alles erledigt!', 'success');
         } catch (err) {
@@ -618,6 +638,86 @@
             s += `<ellipse cx="${rx}" cy="${ey}" rx="15" ry="11" ${tint} stroke="${gc}" stroke-width="${sw}"/>`;
         }
         s += `<path d="M${lx+13} ${ey-1} Q${midX} ${ey-4} ${rx-13} ${ey-1}" stroke="${gc}" stroke-width="${sw*0.8}" fill="none"/>`;
+        return s;
+    }
+
+    /* ── Avatar: Comic Photo (Stylized Photo) ── */
+    function generateComicAvatar(photoUrl) {
+        // This uses the actual photo but applies the SVG filter defined in the body
+        return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 360" preserveAspectRatio="xMidYMid slice" style="filter:url(#comic-filter) saturate(1.2) contrast(1.1);">
+            <image href="${photoUrl}" x="0" y="0" width="100%" height="100%"/>
+        </svg>`;
+    }
+
+    /* ── Avatar: DNA Vector (Bespoke Geometry) ── */
+    function generateDnaAvatar(f) {
+        if (!f.landmarks) return generateMinimalAvatar(f);
+        
+        const lm = f.landmarks;
+        const imgW = f.landmarks.imageWidth;
+        const imgH = f.landmarks.imageHeight;
+        
+        // Helper to map image coords to 200x200 SVG space
+        const box = lm.align(); // aligned box
+        const shiftX = box.x, shiftY = box.y, scale = 180 / Math.max(box.width, box.height);
+        
+        const pts = (points) => points.map(p => `${(p.x - shiftX) * scale + 10},${(p.y - shiftY) * scale + 10}`).join(' ');
+        
+        const jaw = lm.getJawOutline();
+        const lEye = lm.getLeftEye();
+        const rEye = lm.getRightEye();
+        const mouth = lm.getMouth();
+        const nose = lm.getNose();
+        const lBrow = lm.getLeftEyeBrow();
+        const rBrow = lm.getRightEyeBrow();
+
+        const sk = f.skinHex, hr = f.hairHex;
+        const bg = pickBg(sk + 'dna');
+
+        let s = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">`;
+        s += `<rect width="200" height="200" rx="16" fill="${bg}"/>`;
+        
+        // Bespoke Jawline shape
+        s += `<polygon points="${pts(jaw)}" fill="${sk}" stroke="${brighten(sk, 0.8)}" stroke-width="1"/>`;
+        
+        // Hair abstraction (connected to brows/top of jaw)
+        const hairPts = [jaw[16], {x: jaw[16].x, y: jaw[16].y - 40}, {x: jaw[0].x, y: jaw[0].y - 40}, jaw[0]];
+        s += `<path d="M${pts([jaw[0]])} Q100,-20 ${pts([jaw[16]])} L${pts([jaw[16]])} Q100,20 ${pts([jaw[0]])} Z" fill="${hr}" opacity="0.8"/>`;
+
+        // Features as abstract geometric shapes but at REAL positions
+        s += `<polyline points="${pts(lBrow)}" fill="none" stroke="${hr}" stroke-width="3" stroke-linecap="round" opacity="0.6"/>`;
+        s += `<polyline points="${pts(rBrow)}" fill="none" stroke="${hr}" stroke-width="3" stroke-linecap="round" opacity="0.6"/>`;
+        
+        // Eyes
+        s += `<polygon points="${pts(lEye)}" fill="white" stroke="#333" stroke-width="0.5"/>`;
+        s += `<polygon points="${pts(rEye)}" fill="white" stroke="#333" stroke-width="0.5"/>`;
+        
+        // Pupils at center of eye polygons
+        const getCenter = (pSet) => ({ x: pSet.reduce((a,b)=>a+b.x,0)/pSet.length, y: pSet.reduce((a,b)=>a+b.y,0)/pSet.length });
+        const lc = getCenter(lEye), rc = getCenter(rEye);
+        s += `<circle cx="${(lc.x - shiftX) * scale + 10}" cy="${(lc.y - shiftY) * scale + 10}" r="2.5" fill="#333"/>`;
+        s += `<circle cx="${(rc.x - shiftX) * scale + 10}" cy="${(rc.y - shiftY) * scale + 10}" r="2.5" fill="#333"/>`;
+
+        // Glasses if detected
+        if (f.glasses.hasGlasses) {
+            const gc = f.glasses.colorHex;
+            s += `<circle cx="${(lc.x - shiftX) * scale + 10}" cy="${(lc.y - shiftY) * scale + 10}" r="14" fill="none" stroke="${gc}" stroke-width="2" opacity="0.7"/>`;
+            s += `<circle cx="${(rc.x - shiftX) * scale + 10}" cy="${(rc.y - shiftY) * scale + 10}" r="14" fill="none" stroke="${gc}" stroke-width="2" opacity="0.7"/>`;
+        }
+
+        // Nose
+        s += `<polyline points="${pts(nose)}" fill="none" stroke="${brighten(sk, 0.7)}" stroke-width="1.5" opacity="0.5"/>`;
+        
+        // Mouth
+        s += `<polygon points="${pts(mouth)}" fill="${f.expression==='happy'?'#e74c3c':'#333'}" opacity="0.4" stroke="#333" stroke-width="0.5"/>`;
+        
+        // Earring hint
+        if (f.hasEarrings) {
+            s += `<circle cx="${(jaw[0].x - shiftX) * scale + 8}" cy="${(jaw[0].y - shiftY) * scale + 12}" r="3" fill="gold"/>`;
+            s += `<circle cx="${(jaw[16].x - shiftX) * scale + 12}" cy="${(jaw[16].y - shiftY) * scale + 12}" r="3" fill="gold"/>`;
+        }
+
+        s += `</svg>`;
         return s;
     }
 
